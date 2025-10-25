@@ -1,0 +1,18 @@
+api:
+  binance_api_key: ""
+  binance_api_secret: ""
+  database_url: sqlite:///valvulin.db
+
+risk:
+  max_position_size_pct: 2.0
+  max_daily_loss_pct: 3.0
+  leverage: 1.0
+
+data:
+  cache_dir: data/cache
+  export_dir: data/exports
+
+backtester:
+  engine: vectorbt
+  initial_equity: 10000
+  commission: 0.00075
