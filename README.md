@@ -112,6 +112,7 @@ Integra `notify_error` en tus estrategias o envoltorios de ejecución para dispa
 - Ejecuta pruebas manuales con el feed `MockDataFeed`.
 - Añade estrategias en el directorio `strategies/` implementando `BaseStrategy`.
 - Extiende `RiskManager` y `ExecutionEngine` según tus necesidades de cumplimiento y conectores de exchange.
+- Utiliza `analytics.plots.plot_trade_signals` para visualizar velas, indicadores (EMA, MACD, etc.) y entradas/salidas de trades registrados por el backtester.
 
 ## Licencia
 
