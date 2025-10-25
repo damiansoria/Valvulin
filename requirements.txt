@@ -8,3 +8,7 @@ websockets>=11.0,<12.0
 
 # Optional dependencies
 python-binance>=1.0.19,<2.0  # Enables live trading via the official Binance client
+mplfinance>=0.12.10b0  # Advanced candlestick rendering
+plotly>=5.18,<6.0  # Interactive charts and Dash integration
+bokeh>=3.3,<4.0  # Browser-based interactive charts
+dash>=2.14,<3.0  # Local web dashboard for Plotly figures
