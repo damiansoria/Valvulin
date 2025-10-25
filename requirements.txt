@@ -1,0 +1,10 @@
+python-binance
+pandas
+numpy
+ta
+matplotlib
+plotly
+vectorbt
+sqlalchemy
+pyyaml
+python-dotenv
