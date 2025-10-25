@@ -1,0 +1,17 @@
+version: "3.8"
+services:
+  valvulin:
+    build: ..
+    container_name: valvulin-bot
+    restart: unless-stopped
+    environment:
+      - VALVULIN_CONFIG=/config/config.yaml
+      - VALVULIN_TELEGRAM_TOKEN=${VALVULIN_TELEGRAM_TOKEN}
+      - VALVULIN_TELEGRAM_CHAT=${VALVULIN_TELEGRAM_CHAT}
+      - VALVULIN_ALERT_FROM=${VALVULIN_ALERT_FROM}
+      - VALVULIN_ALERT_TO=${VALVULIN_ALERT_TO}
+      - VALVULIN_SMTP_SERVER=${VALVULIN_SMTP_SERVER}
+    volumes:
+      - ../config.yaml:/config/config.yaml:ro
+      - ../logs:/app/logs
+    command: ["python", "-m", "core.engine", "--config", "/config/config.yaml"]

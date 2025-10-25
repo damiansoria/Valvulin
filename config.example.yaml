@@ -1,0 +1,41 @@
+# Ejemplo de configuración para el motor de trading de Valvulin
+version: 1
+logging:
+  level: INFO
+
+data_feeds:
+  - name: mock-binance
+    handler: core.data_feed:MockDataFeed
+    symbols: [BTCUSDT, ETHUSDT]
+    parameters:
+      timeframe: 1m
+      interval: 1
+
+strategies:
+  - name: echo-btc
+    symbol: BTCUSDT
+    timeframe: 1m
+    handler: strategies.basic:EchoStrategy
+    enabled: true
+    parameters:
+      note: "Demo strategy that logs candles"
+  - name: echo-eth
+    symbol: ETHUSDT
+    timeframe: 1m
+    handler: strategies.basic:EchoStrategy
+    enabled: false
+
+risk:
+  max_position: 100
+
+execution:
+  venue: paper
+
+scheduler:
+  intervals:
+    - timeframe: 1m
+      seconds: 60
+    - timeframe: 5m
+      seconds: 300
+    - timeframe: 1h
+      seconds: 3600

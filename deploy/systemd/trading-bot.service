@@ -1,0 +1,17 @@
+[Unit]
+Description=Valvulin Trading Bot
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/valvulin
+Environment=VALVULIN_CONFIG=/opt/valvulin/config.yaml
+EnvironmentFile=-/etc/valvulin/bot.env
+ExecStart=/usr/bin/python -m core.engine --config /opt/valvulin/config.yaml
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
