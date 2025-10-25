@@ -1,43 +1,45 @@
 """Pullback strategy based on EMA20/EMA50 alignment."""
+
 from __future__ import annotations
 
-from typing import Any, Mapping, Sequence
+from typing import Dict
 
-from .base import BaseStrategy
-from .utils import ensure_records, exponential_moving_average
+import pandas as pd
+
+from .base import BaseStrategy, SignalDataFrame
 
 
 class PullbackEMAStrategy(BaseStrategy):
     """Buy when price resumes the trend after an EMA pullback."""
 
-    default_params = {
+    default_params: Dict[str, int] = {
         "short_window": 20,
         "long_window": 50,
     }
 
-    def generate_signal(self, data: Sequence[Mapping[str, Any]] | Any) -> str | None:
-        records = ensure_records(data)
-        if len(records) < 3:
-            return None
+    def generate_signals(self, data: pd.DataFrame) -> SignalDataFrame:
+        """Return long signals when price resumes an EMA-defined uptrend."""
+
+        frame = data.copy()
+        frame = frame.sort_index()
+        signals = pd.Series(0, index=frame.index, dtype=int)
+
+        if len(frame) < 3:
+            return pd.DataFrame({"signal": signals})
 
         short_window = int(self.params["short_window"])
         long_window = int(self.params["long_window"])
 
-        closes = [float(row["close"]) for row in records]
-        ema_short = exponential_moving_average(closes, short_window)
-        ema_long = exponential_moving_average(closes, long_window)
+        ema_short = frame["close"].ewm(span=short_window, adjust=False).mean()
+        ema_long = frame["close"].ewm(span=long_window, adjust=False).mean()
 
-        prev_close = closes[-2]
-        curr_close = closes[-1]
-        prev_ema_short = ema_short[-2]
-        curr_ema_short = ema_short[-1]
-        prev_ema_long = ema_long[-2]
-        curr_ema_long = ema_long[-1]
+        trend_up = (ema_short > ema_long) & (ema_short.shift(1) > ema_long.shift(1))
+        pulled_back = (frame["close"].shift(1) < ema_short.shift(1)) & (
+            frame["close"].shift(1) > ema_long.shift(1)
+        )
+        resumed = frame["close"] > ema_short
+        setup = trend_up & pulled_back & resumed
 
-        trend_up = curr_ema_short > curr_ema_long and prev_ema_short > prev_ema_long
-        pulled_back = prev_close < prev_ema_short and prev_close > prev_ema_long
-        resumed = curr_close > curr_ema_short
+        signals.loc[setup.fillna(False)] = 1
 
-        if trend_up and pulled_back and resumed:
-            return "buy"
-        return None
+        return pd.DataFrame({"signal": signals})

@@ -1,43 +1,47 @@
 """Simple candlestick pattern recognition strategy."""
+
 from __future__ import annotations
 
-from typing import Any, Mapping, Sequence
+from typing import Dict
 
-from .base import BaseStrategy
-from .utils import ensure_records
+import pandas as pd
+
+from .base import BaseStrategy, SignalDataFrame
 
 
 class CandlestickPatternStrategy(BaseStrategy):
     """Detect basic bullish or bearish candlestick reversals."""
 
-    default_params = {"pattern": "bullish_engulfing"}
+    default_params: Dict[str, str] = {"pattern": "bullish_engulfing"}
 
-    def generate_signal(self, data: Sequence[Mapping[str, Any]] | Any) -> str | None:
-        records = ensure_records(data)
-        if len(records) < 2:
-            return None
+    def generate_signals(self, data: pd.DataFrame) -> SignalDataFrame:
+        """Generate engulfing pattern signals for the provided OHLC data."""
 
-        pattern = self.params["pattern"]
-        prev = records[-2]
-        curr = records[-1]
+        frame = data.copy()
+        frame = frame.sort_index()
+        signals = pd.Series(0, index=frame.index, dtype=int)
+
+        if len(frame) < 2:
+            return pd.DataFrame({"signal": signals})
+
+        previous = frame.shift(1)
+        pattern = str(self.params.get("pattern", "bullish_engulfing")).lower()
 
         if pattern == "bullish_engulfing":
-            prev_bearish = float(prev["close"]) < float(prev["open"])
-            curr_bullish = float(curr["close"]) > float(curr["open"])
-            body_engulf = (
-                float(curr["close"]) >= float(prev["open"])
-                and float(curr["open"]) <= float(prev["close"])
+            prev_bearish = previous["close"] < previous["open"]
+            curr_bullish = frame["close"] > frame["open"]
+            body_engulf = (frame["close"] >= previous["open"]) & (
+                frame["open"] <= previous["close"]
             )
-            if prev_bearish and curr_bullish and body_engulf:
-                return "buy"
+            bullish = prev_bearish & curr_bullish & body_engulf
+            signals.loc[bullish.fillna(False)] = 1
         elif pattern == "bearish_engulfing":
-            prev_bullish = float(prev["close"]) > float(prev["open"])
-            curr_bearish = float(curr["close"]) < float(curr["open"])
-            body_engulf = (
-                float(curr["close"]) <= float(prev["open"])
-                and float(curr["open"]) >= float(prev["close"])
+            prev_bullish = previous["close"] > previous["open"]
+            curr_bearish = frame["close"] < frame["open"]
+            body_engulf = (frame["close"] <= previous["open"]) & (
+                frame["open"] >= previous["close"]
             )
-            if prev_bullish and curr_bearish and body_engulf:
-                return "sell"
+            bearish = prev_bullish & curr_bearish & body_engulf
+            signals.loc[bearish.fillna(False)] = -1
 
-        return None
+        return pd.DataFrame({"signal": signals})

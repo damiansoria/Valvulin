@@ -1,5 +1,8 @@
 """Async scheduler used by the trading engine."""
+
 from __future__ import annotations
+
+"""Async scheduler used by the trading engine to trigger strategy evaluations."""
 
 import asyncio
 import logging
@@ -11,6 +14,8 @@ Callback = Callable[[], Awaitable[None]]
 
 @dataclass
 class ScheduledJob:
+    """In-memory description of a job registered with :class:`AsyncScheduler`."""
+
     name: str
     interval: float
     callback: Callback
@@ -20,7 +25,13 @@ class ScheduledJob:
 class AsyncScheduler:
     """Simple asyncio based scheduler."""
 
-    def __init__(self, loop: Optional[asyncio.AbstractEventLoop] = None, logger: Optional[logging.Logger] = None) -> None:
+    def __init__(
+        self,
+        loop: Optional[asyncio.AbstractEventLoop] = None,
+        logger: Optional[logging.Logger] = None,
+    ) -> None:
+        """Create a scheduler bound to ``loop`` and using ``logger`` for reporting."""
+
         self.loop = loop or asyncio.get_event_loop()
         self.logger = logger or logging.getLogger(__name__)
         self._jobs: Dict[str, ScheduledJob] = {}
@@ -28,15 +39,27 @@ class AsyncScheduler:
         self._stop_event = asyncio.Event()
         self._started = False
 
-    def add_job(self, name: str, interval: float, callback: Callback, warmup: float = 0.0) -> None:
+    def add_job(
+        self, name: str, interval: float, callback: Callback, warmup: float = 0.0
+    ) -> None:
+        """Register a job that should invoke ``callback`` every ``interval`` seconds."""
+
         if name in self._jobs:
             raise ValueError(f"Job '{name}' already registered")
-        self._jobs[name] = ScheduledJob(name=name, interval=interval, callback=callback, warmup=warmup)
+        self._jobs[name] = ScheduledJob(
+            name=name, interval=interval, callback=callback, warmup=warmup
+        )
         if self._started:
-            self._tasks[name] = self.loop.create_task(self._job_runner(self._jobs[name]))
-            self.logger.debug("Started scheduled job '%s' immediately after registration", name)
+            self._tasks[name] = self.loop.create_task(
+                self._job_runner(self._jobs[name])
+            )
+            self.logger.debug(
+                "Started scheduled job '%s' immediately after registration", name
+            )
 
     async def start(self) -> None:
+        """Start executing all registered jobs."""
+
         if self._started:
             return
         self.logger.debug("Starting %d scheduled jobs", len(self._jobs))
@@ -46,6 +69,8 @@ class AsyncScheduler:
         self._started = True
 
     async def stop(self) -> None:
+        """Stop all running jobs and wait for their tasks to terminate."""
+
         if not self._started:
             return
         self.logger.debug("Stopping scheduler")
@@ -58,6 +83,8 @@ class AsyncScheduler:
         self._started = False
 
     async def _job_runner(self, job: ScheduledJob) -> None:
+        """Coroutine that repeatedly executes ``job.callback`` until stopped."""
+
         try:
             if job.warmup > 0:
                 await asyncio.sleep(job.warmup)
@@ -67,7 +94,9 @@ class AsyncScheduler:
                 except Exception:  # pragma: no cover - logging side effect
                     self.logger.exception("Error while executing job '%s'", job.name)
                 try:
-                    await asyncio.wait_for(self._stop_event.wait(), timeout=job.interval)
+                    await asyncio.wait_for(
+                        self._stop_event.wait(), timeout=job.interval
+                    )
                 except asyncio.TimeoutError:
                     continue
         except asyncio.CancelledError:  # pragma: no cover

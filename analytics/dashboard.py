@@ -17,7 +17,9 @@ def _format_table(rows: List[List[str]], headers: List[str]) -> str:
             col_widths[idx] = max(col_widths[idx], len(cell))
 
     def fmt_row(values: Iterable[str]) -> str:
-        return " | ".join(cell.ljust(col_widths[idx]) for idx, cell in enumerate(values))
+        return " | ".join(
+            cell.ljust(col_widths[idx]) for idx, cell in enumerate(values)
+        )
 
     header_line = fmt_row(headers)
     separator = "-+-".join("-" * width for width in col_widths)
@@ -25,22 +27,30 @@ def _format_table(rows: List[List[str]], headers: List[str]) -> str:
     return f"{header_line}\n{separator}\n{body}"
 
 
-def load_dashboard(trade_logger: TradeLogger, recent: int = 5) -> str:
+def load_dashboard(
+    trade_logger: TradeLogger, recent: int = 5, backtest_html: Path | None = None
+) -> str:
     trades = trade_logger.load_trades()
     open_trades = trade_logger.load_open_trades()
 
     metrics = compute_performance_metrics(trades)
     strategy_metrics = group_metrics_by_strategy(trades)
+    total_r_multiple = metrics.average_r_multiple * metrics.total_trades
 
     lines = []
     lines.append("=== ESTADO GENERAL DEL BOT ===")
     lines.append(f"Total trades: {metrics.total_trades}")
     lines.append(f"Win rate: {metrics.win_rate:.2%}")
     lines.append(f"Profit factor: {metrics.profit_factor:.2f}")
+    lines.append(f"Average R multiple: {metrics.average_r_multiple:.2f}")
     lines.append(f"Expectancy: {metrics.expectancy:.2f} R")
     lines.append(f"Max drawdown: {metrics.max_drawdown:.2f} R")
-    lines.append(f"R acumulado: {metrics.total_r_multiple:.2f} R")
+    lines.append(f"R acumulado (aprox): {total_r_multiple:.2f} R")
     lines.append("")
+
+    if backtest_html:
+        lines.append(f"Último gráfico interactivo: {backtest_html}")
+        lines.append("")
 
     if open_trades:
         rows = [
@@ -103,6 +113,7 @@ def load_dashboard(trade_logger: TradeLogger, recent: int = 5) -> str:
                 name,
                 f"{metrics.expectancy:.2f}",
                 f"{metrics.win_rate:.1%}",
+                f"{metrics.average_r_multiple:.2f}",
                 f"{metrics.total_trades}",
             ]
             for name, metrics in strategy_metrics.items()
@@ -111,7 +122,7 @@ def load_dashboard(trade_logger: TradeLogger, recent: int = 5) -> str:
         lines.append(
             _format_table(
                 rows,
-                ["Estrategia", "Expectancy", "Win Rate", "# Trades"],
+                ["Estrategia", "Expectancy", "Win Rate", "Avg R", "# Trades"],
             )
         )
 
@@ -138,11 +149,29 @@ def main() -> None:
         default=5,
         help="Número de trades recientes a mostrar",
     )
+    parser.add_argument(
+        "--signals-html",
+        type=Path,
+        default=None,
+        help="Ruta a un gráfico HTML generado por analytics.signals_plot",
+    )
     args = parser.parse_args()
 
-    logger = TradeLogger(trades_path=args.trades_path, open_trades_path=args.open_trades_path)
-    dashboard_text = load_dashboard(logger, recent=args.recent)
+    logger = TradeLogger(
+        trades_path=args.trades_path, open_trades_path=args.open_trades_path
+    )
+    dashboard_text = load_dashboard(
+        logger, recent=args.recent, backtest_html=args.signals_html
+    )
     print(dashboard_text)
+
+    if args.signals_html and args.signals_html.exists():
+        try:
+            import webbrowser
+
+            webbrowser.open(args.signals_html.resolve().as_uri())
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

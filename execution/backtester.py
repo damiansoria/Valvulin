@@ -1,4 +1,5 @@
 """Historical backtesting utilities."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -25,16 +26,52 @@ class TradeRecord:
     r_multiple: Optional[float]
     status: OrderStatus
 
+    def as_dict(self) -> dict:
+        """Return the trade as a serialisable dictionary."""
+
+        return {
+            "symbol": self.signal.symbol,
+            "side": self.signal.side,
+            "entry_time": self.entry_time,
+            "exit_time": self.exit_time,
+            "entry_price": self.entry_price,
+            "exit_price": self.exit_price,
+            "quantity": self.quantity,
+            "pnl": self.pnl,
+            "r_multiple": self.r_multiple,
+            "status": self.status,
+        }
+
 
 @dataclass(slots=True)
 class BacktestResult:
     """Summary statistics for a backtest run."""
 
     trades: List[TradeRecord]
+    equity_curve: pd.Series
     win_rate: float
-    average_r: float
+    average_r_multiple: float
+    profit_factor: float
     max_drawdown: float
+    expectancy: float
     cumulative_return: float
+
+    def trades_frame(self) -> pd.DataFrame:
+        """Return the list of trades as a :class:`pandas.DataFrame`."""
+
+        return pd.DataFrame([trade.as_dict() for trade in self.trades])
+
+    def summary(self) -> dict[str, float]:
+        """Return a dictionary with the key performance metrics of the run."""
+
+        return {
+            "win_rate": self.win_rate,
+            "average_r_multiple": self.average_r_multiple,
+            "profit_factor": self.profit_factor,
+            "max_drawdown": self.max_drawdown,
+            "expectancy": self.expectancy,
+            "cumulative_return": self.cumulative_return,
+        }
 
 
 class Backtester:
@@ -51,8 +88,11 @@ class Backtester:
         self.price_column = price_column
 
     def run(self, signals: Iterable[TradeSignal]) -> BacktestResult:
+        """Simulate the provided trade ``signals`` over the stored OHLCV data."""
+
         trades: List[TradeRecord] = []
-        equity_curve: List[float] = []
+        equity_values: List[float] = []
+        equity_index: List[datetime] = []
         equity = 0.0
 
         for signal in signals:
@@ -61,18 +101,28 @@ class Backtester:
                 continue
             trades.append(record)
             equity += record.pnl
-            equity_curve.append(equity)
+            equity_values.append(equity)
+            equity_index.append(record.exit_time)
 
         win_rate = self._compute_win_rate(trades)
         average_r = self._compute_average_r(trades)
-        max_drawdown = self._compute_drawdown(equity_curve)
-        cumulative_return = equity_curve[-1] if equity_curve else 0.0
+        profit_factor = self._compute_profit_factor(trades)
+        expectancy = self._compute_expectancy(trades)
+        max_drawdown = self._compute_drawdown(equity_values)
+        cumulative_return = equity_values[-1] if equity_values else 0.0
+
+        equity_curve = pd.Series(
+            equity_values, index=pd.to_datetime(equity_index), name="equity"
+        )
 
         return BacktestResult(
             trades=trades,
+            equity_curve=equity_curve,
             win_rate=win_rate,
-            average_r=average_r,
+            average_r_multiple=average_r,
+            profit_factor=profit_factor,
             max_drawdown=max_drawdown,
+            expectancy=expectancy,
             cumulative_return=cumulative_return,
         )
 
@@ -95,10 +145,14 @@ class Backtester:
             entry_time, entry_price, entry_position = entry_info
             entry_df = self.ohlcv.iloc[entry_position:]
 
-        exit_time, exit_price, status = self._simulate_exit(signal, entry_price, entry_df)
+        exit_time, exit_price, status = self._simulate_exit(
+            signal, entry_price, entry_df
+        )
         quantity = signal.quantity
         pnl = self._compute_pnl(signal.side, entry_price, exit_price, quantity)
-        r_multiple = self._compute_r_multiple(signal.side, entry_price, exit_price, signal.stop_loss)
+        r_multiple = self._compute_r_multiple(
+            signal.side, entry_price, exit_price, signal.stop_loss
+        )
 
         return TradeRecord(
             signal=signal,
@@ -137,7 +191,11 @@ class Backtester:
         trailing_delta = signal.trailing_delta
         trailing_stop = None
         if trailing_delta is not None:
-            trailing_stop = entry_price - trailing_delta if signal.side == "BUY" else entry_price + trailing_delta
+            trailing_stop = (
+                entry_price - trailing_delta
+                if signal.side == "BUY"
+                else entry_price + trailing_delta
+            )
 
         for _, row in entry_df.iterrows():
             current_time = row.name
@@ -166,10 +224,16 @@ class Backtester:
                     return current_time, float(trailing_stop), OrderStatus.FILLED
 
         last_row = entry_df.iloc[-1]
-        return entry_df.index[-1], float(last_row[self.price_column]), OrderStatus.EXPIRED
+        return (
+            entry_df.index[-1],
+            float(last_row[self.price_column]),
+            OrderStatus.EXPIRED,
+        )
 
     @staticmethod
-    def _compute_pnl(side: str, entry_price: float, exit_price: float, quantity: float) -> float:
+    def _compute_pnl(
+        side: str, entry_price: float, exit_price: float, quantity: float
+    ) -> float:
         direction = 1 if side == "BUY" else -1
         return direction * (exit_price - entry_price) * quantity
 
@@ -208,7 +272,36 @@ class Backtester:
 
     @staticmethod
     def _compute_average_r(trades: Sequence[TradeRecord]) -> float:
-        r_values = [trade.r_multiple for trade in trades if trade.r_multiple is not None]
+        r_values = [
+            trade.r_multiple for trade in trades if trade.r_multiple is not None
+        ]
         if not r_values:
             return 0.0
         return float(np.mean(r_values))
+
+    @staticmethod
+    def _compute_profit_factor(trades: Sequence[TradeRecord]) -> float:
+        if not trades:
+            return 0.0
+        gains = [trade.pnl for trade in trades if trade.pnl > 0]
+        losses = [abs(trade.pnl) for trade in trades if trade.pnl < 0]
+        gross_profit = float(np.sum(gains)) if gains else 0.0
+        gross_loss = float(np.sum(losses)) if losses else 0.0
+        if gross_loss == 0.0:
+            return float("inf") if gross_profit > 0 else 0.0
+        return gross_profit / gross_loss
+
+    @staticmethod
+    def _compute_expectancy(trades: Sequence[TradeRecord]) -> float:
+        r_values = [
+            trade.r_multiple for trade in trades if trade.r_multiple is not None
+        ]
+        if not r_values:
+            return 0.0
+        wins = [r for r in r_values if r > 0]
+        losses = [r for r in r_values if r < 0]
+        win_rate = len(wins) / len(r_values)
+        loss_rate = len(losses) / len(r_values)
+        avg_win = float(np.mean(wins)) if wins else 0.0
+        avg_loss = float(np.mean(losses)) if losses else 0.0
+        return win_rate * avg_win + loss_rate * avg_loss

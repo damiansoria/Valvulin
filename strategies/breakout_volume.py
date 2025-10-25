@@ -1,42 +1,47 @@
 """Breakout strategy that requires confirmation via volume expansion."""
+
 from __future__ import annotations
 
-from typing import Any, Mapping, Sequence
+from typing import Dict
 
-from .base import BaseStrategy
-from .utils import ensure_records
+import pandas as pd
+
+from .base import BaseStrategy, SignalDataFrame
 
 
 class BreakoutVolumeStrategy(BaseStrategy):
     """Detect price breakouts that happen with a volume surge."""
 
-    default_params = {
+    default_params: Dict[str, Any] = {
         "breakout_window": 20,
         "volume_multiplier": 1.5,
     }
 
-    def generate_signal(self, data: Sequence[Mapping[str, Any]] | Any) -> str | None:
-        records = ensure_records(data)
-        if len(records) < 2:
-            return None
+    def generate_signals(self, data: pd.DataFrame) -> SignalDataFrame:
+        """Return buy signals when price breaks the recent high on strong volume."""
+
+        frame = data.copy()
+        frame = frame.sort_index()
+        signals = pd.Series(0, index=frame.index, dtype=int)
+
+        if len(frame) < 2:
+            return pd.DataFrame({"signal": signals})
 
         breakout_window = int(self.params["breakout_window"])
         volume_multiplier = float(self.params["volume_multiplier"])
 
-        window = min(len(records) - 1, breakout_window)
-        recent = records[-(window + 1) :]
-        history = recent[:-1]
-        current = recent[-1]
+        window = min(len(frame) - 1, breakout_window)
+        rolling_high = (
+            frame["high"].rolling(window=window, min_periods=1).max().shift(1)
+        )
+        avg_volume = (
+            frame["volume"].rolling(window=window, min_periods=1).mean().shift(1)
+        )
 
-        highs = [float(row["high"]) for row in history]
-        volumes = [float(row["volume"]) for row in history]
+        breakout_condition = frame["close"] > rolling_high
+        volume_condition = frame["volume"] >= volume_multiplier * avg_volume
+        combined = breakout_condition & volume_condition
 
-        highest_high = max(highs)
-        avg_volume = sum(volumes) / len(volumes)
+        signals.loc[combined.fillna(False)] = 1
 
-        is_breakout = float(current["close"]) > highest_high
-        volume_ok = float(current["volume"]) >= volume_multiplier * avg_volume
-
-        if is_breakout and volume_ok:
-            return "buy"
-        return None
+        return pd.DataFrame({"signal": signals})
