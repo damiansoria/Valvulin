@@ -1,4 +1,11 @@
-"""Main trading engine orchestration."""
+"""Main trading engine orchestration.
+
+The :class:`TradingEngine` wires together configuration loading, data feeds,
+strategy scheduling and order execution.  It is responsible for bootstrapping
+the asynchronous services and acting as the integration point between the
+``core`` and ``execution`` packages.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -8,7 +15,13 @@ import signal
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from .config import BotConfig, SchedulerInterval, apply_cli_overrides, create_parser, load_config
+from .config import (
+    BotConfig,
+    SchedulerInterval,
+    apply_cli_overrides,
+    create_parser,
+    load_config,
+)
 from .data_feed import DataFeedManager
 from .execution import ExecutionEngine
 from .risk import RiskManager
@@ -19,9 +32,11 @@ LOGGER = logging.getLogger("valvulin.engine")
 
 
 class TradingEngine:
-    """Coordinates data feeds, strategies, risk and execution."""
+    """Coordinates data feeds, strategies, risk management and execution."""
 
-    def __init__(self, config: BotConfig, loop: Optional[asyncio.AbstractEventLoop] = None) -> None:
+    def __init__(
+        self, config: BotConfig, loop: Optional[asyncio.AbstractEventLoop] = None
+    ) -> None:
         self.config = config
         self.loop = loop or asyncio.get_event_loop()
         self.logger = LOGGER
@@ -39,15 +54,21 @@ class TradingEngine:
             queue=self.queue,
             loop=self.loop,
         )
-        self.scheduler = AsyncScheduler(loop=self.loop, logger=logging.getLogger("valvulin.scheduler"))
+        self.scheduler = AsyncScheduler(
+            loop=self.loop, logger=logging.getLogger("valvulin.scheduler")
+        )
         self._started = False
         self._register_scheduler_jobs(config)
 
     def _register_scheduler_jobs(self, config: BotConfig) -> None:
+        """Register all interval jobs defined in the configuration file."""
+
         for interval in config.scheduler.intervals:
             self._register_interval(interval)
 
     def _register_interval(self, interval: SchedulerInterval) -> None:
+        """Create a scheduled callback that dispatches timeframe events."""
+
         async def callback(timeframe: str = interval.timeframe) -> None:
             event = {
                 "timeframe": timeframe,
@@ -66,6 +87,8 @@ class TradingEngine:
         self.logger.debug("Registered scheduler job %s", name)
 
     async def start(self) -> None:
+        """Start all sub-systems once, ensuring idempotency."""
+
         if self._started:
             return
         self.logger.info("Starting trading engine")
@@ -75,6 +98,8 @@ class TradingEngine:
         self._started = True
 
     async def stop(self) -> None:
+        """Stop all sub-systems in reverse order of their dependencies."""
+
         if not self._started:
             return
         self.logger.info("Stopping trading engine")
@@ -84,6 +109,8 @@ class TradingEngine:
         self._started = False
 
     async def run_forever(self) -> None:
+        """Run the engine until a termination signal is received."""
+
         await self.start()
         stop_event = asyncio.Event()
 
@@ -102,7 +129,11 @@ class TradingEngine:
         finally:
             await self.stop()
 
-    def set_strategy_enabled(self, symbol: str, timeframe: str, name: str, enabled: bool) -> None:
+    def set_strategy_enabled(
+        self, symbol: str, timeframe: str, name: str, enabled: bool
+    ) -> None:
+        """Toggle an individual strategy on or off at runtime."""
+
         self.strategy_manager.set_enabled(symbol, timeframe, name, enabled)
         self.config.set_strategy_enabled(symbol, timeframe, name, enabled)
 

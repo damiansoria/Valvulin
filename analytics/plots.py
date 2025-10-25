@@ -15,8 +15,9 @@ except Exception:  # pragma: no cover - keep working even if pandas is unavailab
     pd = None  # type: ignore
 
 from .performance import group_metrics_by_strategy
+from .signals_plot import plot_backtest_signals
 from .trade_logger import TradeEntry
-from execution.backtester import TradeRecord
+from execution.backtester import BacktestResult, TradeRecord
 
 
 def _ensure_output_path(path: Path | str | None) -> Path | None:
@@ -139,8 +140,13 @@ def _validate_ohlc(ohlc: "pd.DataFrame") -> "pd.DataFrame":
 
 def _resolve_indicator_series(
     ohlc: "pd.DataFrame",
-    indicator_builders: Mapping[str, Callable[["pd.DataFrame"], "pd.Series | pd.DataFrame | Sequence[float]"]]
-    | None,
+    indicator_builders: (
+        Mapping[
+            str,
+            Callable[["pd.DataFrame"], "pd.Series | pd.DataFrame | Sequence[float]"],
+        ]
+        | None
+    ),
 ) -> list[tuple[str, "pd.Series"]]:
     if indicator_builders is None:
         return []
@@ -171,9 +177,20 @@ def _plot_candlesticks(ax: plt.Axes, ohlc: "pd.DataFrame") -> None:
 
     for _, row in ohlc_numeric.iterrows():
         color = "#2b8a3e" if row["close"] >= row["open"] else "#d9480f"
-        ax.vlines(row["timestamp"], row["low"], row["high"], color=color, linewidth=1.0, alpha=0.9)
+        ax.vlines(
+            row["timestamp"],
+            row["low"],
+            row["high"],
+            color=color,
+            linewidth=1.0,
+            alpha=0.9,
+        )
         body_height = abs(row["close"] - row["open"])
-        body_height = body_height if body_height > 0 else max(row["high"] - row["low"], 1e-6) * 0.02
+        body_height = (
+            body_height
+            if body_height > 0
+            else max(row["high"] - row["low"], 1e-6) * 0.02
+        )
         lower = min(row["open"], row["close"])
         candle = Rectangle(
             (row["timestamp"] - width / 2, lower),
@@ -185,7 +202,9 @@ def _plot_candlesticks(ax: plt.Axes, ohlc: "pd.DataFrame") -> None:
         )
         ax.add_patch(candle)
 
-    ax.set_xlim(ohlc_numeric["timestamp"].min() - width, ohlc_numeric["timestamp"].max() + width)
+    ax.set_xlim(
+        ohlc_numeric["timestamp"].min() - width, ohlc_numeric["timestamp"].max() + width
+    )
     ax.set_ylabel("Price")
     ax.xaxis_date()
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
@@ -195,10 +214,13 @@ def plot_trade_signals(
     ohlc: "pd.DataFrame",
     trades: Iterable[TradeRecord],
     *,
-    indicator_builders: Mapping[
-        str, Callable[["pd.DataFrame"], "pd.Series | pd.DataFrame | Sequence[float]"]
-    ]
-    | None = None,
+    indicator_builders: (
+        Mapping[
+            str,
+            Callable[["pd.DataFrame"], "pd.Series | pd.DataFrame | Sequence[float]"],
+        ]
+        | None
+    ) = None,
     output_path: Path | str | None = None,
     show: bool = False,
     annotate_exits: bool = True,
@@ -257,7 +279,9 @@ def plot_trade_signals(
 
         color = "#2b8a3e" if pnl > 0 else "#d9480f" if pnl < 0 else "#868e96"
         marker = "^" if side == "BUY" else "v"
-        result_label = "Profitable" if pnl > 0 else "Losing" if pnl < 0 else "Break-even"
+        result_label = (
+            "Profitable" if pnl > 0 else "Losing" if pnl < 0 else "Break-even"
+        )
         entry_label = f"{result_label} {side.title()} entry"
         label = entry_label if entry_label not in legend_seen else None
         ax.scatter(
@@ -320,7 +344,11 @@ def plot_trade_signals(
         label_to_handle: dict[str, Any] = {}
         for handle, label in zip(handles, labels):
             label_to_handle[label] = handle
-        manual_handles = [label_to_handle[label] for label in legend_labels if label in label_to_handle]
+        manual_handles = [
+            label_to_handle[label]
+            for label in legend_labels
+            if label in label_to_handle
+        ]
         manual_labels = [label for label in legend_labels if label in label_to_handle]
         indicator_handles: list[Any] = []
         indicator_labels: list[str] = []
@@ -346,9 +374,24 @@ def plot_trade_signals(
     return fig
 
 
+def plot_interactive_backtest(
+    ohlc: "pd.DataFrame",
+    result: "BacktestResult",
+    *,
+    indicators: Mapping[str, "pd.Series"] | None = None,
+    title: str = "Backtest Results",
+) -> Path:
+    """Wrapper helper that stores an interactive Plotly chart for a backtest."""
+
+    return plot_backtest_signals(
+        ohlc, result.trades, indicators=indicators, title=title
+    )
+
+
 __all__ = [
     "plot_equity_curve",
     "plot_r_distribution",
     "plot_strategy_patterns",
     "plot_trade_signals",
+    "plot_interactive_backtest",
 ]

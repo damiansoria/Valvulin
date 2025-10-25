@@ -1,44 +1,45 @@
 """RSI divergence strategy."""
+
 from __future__ import annotations
 
-from typing import Any, Mapping, Sequence
+from typing import Dict
 
-from .base import BaseStrategy
-from .utils import ensure_records
+import pandas as pd
+
+from .base import BaseStrategy, SignalDataFrame
 
 
 class RSIDivergenceStrategy(BaseStrategy):
     """Detect bullish or bearish divergences between price and RSI."""
 
-    default_params = {
+    default_params: Dict[str, str] = {
         "divergence_type": "bullish",  # or "bearish" or "both"
     }
 
-    def generate_signal(self, data: Sequence[Mapping[str, Any]] | Any) -> str | None:
-        records = ensure_records(data)
-        if len(records) < 2:
-            return None
+    def generate_signals(self, data: pd.DataFrame) -> SignalDataFrame:
+        """Return divergence signals using closing price and RSI comparisons."""
 
-        divergence_type = self.params["divergence_type"]
+        frame = data.copy()
+        frame = frame.sort_index()
+        signals = pd.Series(0, index=frame.index, dtype=int)
 
-        prev = records[-2]
-        curr = records[-1]
+        if len(frame) < 2:
+            return pd.DataFrame({"signal": signals})
 
-        price_higher_high = float(curr["close"]) > float(prev["close"])
-        price_lower_low = float(curr["close"]) < float(prev["close"])
-        rsi_higher = float(curr["rsi"]) > float(prev["rsi"])
-        rsi_lower = float(curr["rsi"]) < float(prev["rsi"])
+        previous = frame.shift(1)
+        divergence_type = str(self.params.get("divergence_type", "bullish")).lower()
 
-        bullish = price_lower_low and rsi_higher
-        bearish = price_higher_high and rsi_lower
+        price_higher_high = frame["close"] > previous["close"]
+        price_lower_low = frame["close"] < previous["close"]
+        rsi_higher = frame["rsi"] > previous["rsi"]
+        rsi_lower = frame["rsi"] < previous["rsi"]
 
-        if divergence_type == "bullish" and bullish:
-            return "buy"
-        if divergence_type == "bearish" and bearish:
-            return "sell"
-        if divergence_type == "both":
-            if bullish:
-                return "buy"
-            if bearish:
-                return "sell"
-        return None
+        bullish = price_lower_low & rsi_higher
+        bearish = price_higher_high & rsi_lower
+
+        if divergence_type in {"bullish", "both"}:
+            signals.loc[bullish.fillna(False)] = 1
+        if divergence_type in {"bearish", "both"}:
+            signals.loc[bearish.fillna(False)] = -1
+
+        return pd.DataFrame({"signal": signals})

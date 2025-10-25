@@ -1,9 +1,11 @@
 """Unit tests for strategy implementations using synthetic data."""
+
 from __future__ import annotations
 
 import sys
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
@@ -18,42 +20,59 @@ from strategies import (  # noqa: E402  # isort:skip
 )
 
 
+def _to_frame(records: list[dict]) -> pd.DataFrame:
+    return pd.DataFrame(records)
+
+
 def test_breakout_volume_signal_triggered() -> None:
-    data = [
-        {"high": 100, "close": 95, "volume": 100},
-        {"high": 102, "close": 101, "volume": 120},
-        {"high": 103, "close": 102, "volume": 130},
-        {"high": 104, "close": 106, "volume": 260},
-    ]
+    data = _to_frame(
+        [
+            {"high": 100, "close": 95, "volume": 100},
+            {"high": 102, "close": 101, "volume": 120},
+            {"high": 103, "close": 102, "volume": 130},
+            {"high": 104, "close": 106, "volume": 260},
+        ]
+    )
     strategy = BreakoutVolumeStrategy(breakout_window=3, volume_multiplier=2.0)
+    signals = strategy.generate_signals(data)
+    assert signals["signal"].iloc[-1] == 1
     assert strategy.generate_signal(data) == "buy"
 
 
 def test_breakout_volume_no_volume_confirmation() -> None:
-    data = [
-        {"high": 100, "close": 99, "volume": 200},
-        {"high": 101, "close": 100, "volume": 200},
-        {"high": 102, "close": 103, "volume": 150},
-    ]
+    data = _to_frame(
+        [
+            {"high": 100, "close": 99, "volume": 200},
+            {"high": 101, "close": 100, "volume": 200},
+            {"high": 102, "close": 103, "volume": 150},
+        ]
+    )
     strategy = BreakoutVolumeStrategy(breakout_window=2, volume_multiplier=1.5)
+    signals = strategy.generate_signals(data)
+    assert signals["signal"].iloc[-1] == 0
     assert strategy.generate_signal(data) is None
 
 
 def test_pullback_ema_strategy_detects_resumption() -> None:
-    data = [
-        {"close": value}
-        for value in [100, 101, 102, 103, 104, 105, 104, 108]
-    ]
+    data = _to_frame(
+        [{"close": value} for value in [100, 101, 102, 103, 104, 105, 104, 108]]
+    )
     strategy = PullbackEMAStrategy(short_window=3, long_window=5)
+    signals = strategy.generate_signals(data)
+    assert signals["signal"].iloc[-1] == 1
     assert strategy.generate_signal(data) == "buy"
 
 
 def test_candlestick_bullish_engulfing() -> None:
-    data = [
-        {"open": 105, "close": 100},
-        {"open": 99, "close": 110},
-    ]
+    data = _to_frame(
+        [
+            {"open": 105, "close": 100},
+            {"open": 99, "close": 110},
+        ]
+    )
     strategy = CandlestickPatternStrategy(pattern="bullish_engulfing")
+    signals = strategy.generate_signals(data)
+    assert signals["signal"].iloc[-1] == 1
     assert strategy.generate_signal(data) == "buy"
 
 
@@ -66,41 +85,55 @@ def test_candlestick_configurable_patterns(pattern: str, expected: str) -> None:
     second = {"open": 7, "close": 11}
     if pattern == "bearish_engulfing":
         first, second = {"open": 8, "close": 10}, {"open": 11, "close": 7}
+    data = _to_frame([first, second])
     strategy = CandlestickPatternStrategy(pattern=pattern)
-    assert strategy.generate_signal([first, second]) == expected
+    signals = strategy.generate_signals(data)
+    value = signals["signal"].iloc[-1]
+    assert (value == 1 and expected == "buy") or (value == -1 and expected == "sell")
+    assert strategy.generate_signal(data) == expected
 
 
 def test_ema_macd_generates_buy_signal() -> None:
-    data = [
-        {"close": price}
-        for price in [100, 99, 98, 97, 96, 97, 98, 99]
-    ]
+    data = _to_frame([{"close": price} for price in [100, 99, 98, 97, 96, 97, 98, 99]])
     strategy = EMAMACDStrategy(ema_short=3, ema_long=5, macd_signal=3)
+    signals = strategy.generate_signals(data)
+    assert signals["signal"].iloc[-1] == 1
     assert strategy.generate_signal(data) == "buy"
 
 
 def test_inside_bar_identification() -> None:
-    data = [
-        {"high": 110, "low": 100},
-        {"high": 112, "low": 98},
-        {"high": 109, "low": 103},
-    ]
+    data = _to_frame(
+        [
+            {"high": 110, "low": 100},
+            {"high": 112, "low": 98},
+            {"high": 109, "low": 103},
+        ]
+    )
     strategy = InsideBarStrategy(max_ratio=0.6)
+    signals = strategy.generate_signals(data)
+    assert bool(signals["inside_bar"].iloc[-1]) is True
+    assert signals["signal"].iloc[-1] == 0
     assert strategy.generate_signal(data) == "watch"
 
 
 def test_rsi_divergence_bullish_and_bearish() -> None:
-    bullish_data = [
-        {"close": 100, "rsi": 30},
-        {"close": 98, "rsi": 35},
-    ]
-    bearish_data = [
-        {"close": 100, "rsi": 60},
-        {"close": 102, "rsi": 55},
-    ]
+    bullish_data = _to_frame(
+        [
+            {"close": 100, "rsi": 30},
+            {"close": 98, "rsi": 35},
+        ]
+    )
+    bearish_data = _to_frame(
+        [
+            {"close": 100, "rsi": 60},
+            {"close": 102, "rsi": 55},
+        ]
+    )
     bullish = RSIDivergenceStrategy(divergence_type="both")
     bearish = RSIDivergenceStrategy(divergence_type="bearish")
+    assert bullish.generate_signals(bullish_data)["signal"].iloc[-1] == 1
     assert bullish.generate_signal(bullish_data) == "buy"
+    assert bearish.generate_signals(bearish_data)["signal"].iloc[-1] == -1
     assert bearish.generate_signal(bearish_data) == "sell"
 
 
