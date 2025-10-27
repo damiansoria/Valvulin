@@ -540,6 +540,11 @@ elif tab == "🔁 Backtesting":
         st.subheader("📈 Curva de Patrimonio")
         st.line_chart(equity_curve, height=300)
 
+        st.subheader("📉 Curva de Drawdown")
+        drawdown_chart = result.drawdown * 100 if hasattr(result, "drawdown") else None
+        if drawdown_chart is not None:
+            st.line_chart(drawdown_chart.rename("Drawdown %"), height=200)
+
         if not trades_df.empty:
             st.subheader("📊 Distribución de Retornos")
             hist_df = trades_df.copy()
