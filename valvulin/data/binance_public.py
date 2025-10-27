@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import logging
 import time
-from typing import Iterable, List, Optional
+from typing import Callable, Iterable, List, Optional
 
 import pandas as pd
 import requests
@@ -45,6 +45,7 @@ class BinancePublicDataFeed:
         rate_sleep: float = 0.35,
         compress: bool = False,
         cache: bool = True,
+        max_limit: int = MAX_LIMIT,
     ) -> None:
         self.data_dir = Path(data_dir)
         self.base_url = base_url.rstrip("/")
@@ -52,6 +53,7 @@ class BinancePublicDataFeed:
         self.compress = compress
         self.cache = cache
         self._session = requests.Session()
+        self.max_limit = max(1, min(max_limit, MAX_LIMIT))
 
     def fetch_klines(
         self,
@@ -59,11 +61,13 @@ class BinancePublicDataFeed:
         interval: str,
         start_time: Optional[int] = None,
         end_time: Optional[int] = None,
+        progress_callback: Optional[Callable[["_ChunkInfo", int], None]] = None,
     ) -> pd.DataFrame:
         """Descargar velas históricas usando la API pública de Binance."""
 
         url = f"{self.base_url}/api/v3/klines"
-        params_base = {"symbol": symbol.upper(), "interval": interval, "limit": MAX_LIMIT}
+        limit = max(1, min(self.max_limit, MAX_LIMIT))
+        params_base = {"symbol": symbol.upper(), "interval": interval, "limit": limit}
         logger.info(
             "binance_fetch_start",
             extra={"symbol": symbol, "interval": interval, "start_time": start_time, "end_time": end_time},
@@ -96,7 +100,13 @@ class BinancePublicDataFeed:
                 },
             )
 
-            if len(data) < MAX_LIMIT:
+            if progress_callback is not None:
+                try:
+                    progress_callback(chunk_info, len(rows))
+                except Exception as exc:  # pragma: no cover - feedback externo
+                    logger.warning("binance_progress_callback_error", extra={"error": str(exc)})
+
+            if len(data) < limit:
                 break
 
             last_open_time = chunk_info.last_open_time_ms
@@ -136,6 +146,7 @@ class BinancePublicDataFeed:
         end_time: Optional[int] = None,
         out_path: Optional[str | Path] = None,
         compress: Optional[bool] = None,
+        progress_callback: Optional[Callable[["_ChunkInfo", int], None]] = None,
     ) -> Path:
         """Descargar datos y almacenarlos en CSV (con opción de compresión)."""
 
@@ -160,7 +171,13 @@ class BinancePublicDataFeed:
                 last_timestamp = self._to_timestamp_ms(last_open_time)
                 fetch_start = max(start_time or (last_timestamp + 1), last_timestamp + 1)
 
-        fetched = self.fetch_klines(symbol, interval, start_time=fetch_start, end_time=end_time)
+        fetched = self.fetch_klines(
+            symbol,
+            interval,
+            start_time=fetch_start,
+            end_time=end_time,
+            progress_callback=progress_callback,
+        )
 
         if existing is not None and not existing.empty:
             combined = pd.concat([existing, fetched], ignore_index=True)

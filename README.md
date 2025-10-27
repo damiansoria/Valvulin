@@ -179,3 +179,19 @@ Valvulin incluye configuraciones de referencia para Docker, systemd y supervisor
 ## Licencia
 
 Este proyecto se entrega tal cual. Ajusta la licencia según los requerimientos de tu organización.
+
+## Interfaz Streamlit
+
+Puedes ejecutar la interfaz visual con:
+
+```bash
+streamlit run streamlit_app.py
+```
+
+Desde ahí podrás:
+
+- Descargar datos históricos desde Binance (sin API Key).
+- Ver los datos guardados localmente y su estado de actualización.
+- Actualizar feeds en el `config.yaml` con un solo clic.
+
+Ejemplo visual: panel con controles de símbolo, intervalo, fecha inicial, botón de descarga, registro de progreso y estado del archivo descargado.
