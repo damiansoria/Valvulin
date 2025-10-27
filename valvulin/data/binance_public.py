@@ -61,7 +61,7 @@ class BinancePublicDataFeed:
         interval: str,
         start_time: Optional[int] = None,
         end_time: Optional[int] = None,
-        progress_callback: Optional[Callable[["_ChunkInfo", int], None]] = None,
+        chunk_callback: Optional[Callable[["_ChunkInfo", int], None]] = None,
     ) -> pd.DataFrame:
         """Descargar velas históricas usando la API pública de Binance."""
 
@@ -100,9 +100,9 @@ class BinancePublicDataFeed:
                 },
             )
 
-            if progress_callback is not None:
+            if chunk_callback is not None:
                 try:
-                    progress_callback(chunk_info, len(rows))
+                    chunk_callback(chunk_info, len(rows))
                 except Exception as exc:  # pragma: no cover - feedback externo
                     logger.warning("binance_progress_callback_error", extra={"error": str(exc)})
 
@@ -146,9 +146,15 @@ class BinancePublicDataFeed:
         end_time: Optional[int] = None,
         out_path: Optional[str | Path] = None,
         compress: Optional[bool] = None,
-        progress_callback: Optional[Callable[["_ChunkInfo", int], None]] = None,
+        progress_callback: Optional[Callable[[int, Optional[str]], None]] = None,
+        chunk_callback: Optional[Callable[["_ChunkInfo", int], None]] = None,
     ) -> Path:
-        """Descargar datos y almacenarlos en CSV (con opción de compresión)."""
+        """Descargar datos y almacenarlos en CSV (con opción de compresión).
+
+        El callback ``progress_callback`` recibe el porcentaje estimado (0-100)
+        y un mensaje descriptivo. ``chunk_callback`` mantiene compatibilidad con
+        la retroalimentación detallada de cada bloque descargado.
+        """
 
         use_compress = self.compress if compress is None else compress
         if out_path is None:
@@ -171,12 +177,65 @@ class BinancePublicDataFeed:
                 last_timestamp = self._to_timestamp_ms(last_open_time)
                 fetch_start = max(start_time or (last_timestamp + 1), last_timestamp + 1)
 
+        if progress_callback is not None:
+            try:
+                progress_callback(0, "Preparando descarga...")
+            except Exception as exc:  # pragma: no cover - feedback externo
+                logger.warning("binance_progress_callback_error", extra={"error": str(exc)})
+
+        reference_start = fetch_start
+        target_end = end_time
+        if reference_start is not None and target_end is None:
+            target_end = int(datetime.now(timezone.utc).timestamp() * 1000)
+
+        total_span_ms: Optional[int] = None
+        if reference_start is not None and target_end is not None and target_end > reference_start:
+            total_span_ms = target_end - reference_start
+
+        last_pct_reported = 0
+
+        def _forward_chunk(chunk: _ChunkInfo, total_rows: int) -> None:
+            nonlocal last_pct_reported
+
+            if chunk_callback is not None:
+                try:
+                    chunk_callback(chunk, total_rows)
+                except Exception as exc:  # pragma: no cover - feedback externo
+                    logger.warning("binance_progress_callback_error", extra={"error": str(exc)})
+
+            if progress_callback is None:
+                return
+
+            pct: int
+            message = f"Descargadas {total_rows} velas..."
+
+            if total_span_ms is not None and reference_start is not None:
+                covered = max(0, chunk.last_open_time_ms - reference_start)
+                if covered >= total_span_ms:
+                    pct = 99
+                else:
+                    pct = max(last_pct_reported, min(99, int((covered / total_span_ms) * 100)))
+            else:
+                pct = min(95, last_pct_reported + 5)
+
+            if pct > last_pct_reported:
+                last_pct_reported = pct
+
+            try:
+                progress_callback(last_pct_reported, message)
+            except Exception as exc:  # pragma: no cover - feedback externo
+                logger.warning("binance_progress_callback_error", extra={"error": str(exc)})
+
+        internal_callback = None
+        if progress_callback is not None or chunk_callback is not None:
+            internal_callback = _forward_chunk
+
         fetched = self.fetch_klines(
             symbol,
             interval,
             start_time=fetch_start,
             end_time=end_time,
-            progress_callback=progress_callback,
+            chunk_callback=internal_callback,
         )
 
         if existing is not None and not existing.empty:
@@ -190,6 +249,12 @@ class BinancePublicDataFeed:
             combined.to_csv(out_path, index=False, compression="gzip")
         else:
             combined.to_csv(out_path, index=False)
+
+        if progress_callback is not None:
+            try:
+                progress_callback(100, "✅ Descarga completada")
+            except Exception as exc:  # pragma: no cover - feedback externo
+                logger.warning("binance_progress_callback_error", extra={"error": str(exc)})
 
         logger.info(
             "binance_download_complete",

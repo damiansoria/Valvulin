@@ -353,13 +353,23 @@ if current_tab == "📥 Datos":
                 else:
                     st.warning(f"{symbol} ({interval}) - ⚠️ Aún no se ha descargado ningún archivo de datos.")
 
-    log_placeholder = st.empty()
-    log_placeholder.text_area(
-        "Registro de descargas",
-        value="\n".join(st.session_state.get("logs", [])),
-        height=220,
-        disabled=True,
-    )
+    if "download_logs" not in st.session_state:
+        st.session_state["download_logs"] = []
+
+    log_container = st.empty()
+
+    def _render_download_logs() -> None:
+        log_container.text_area(
+            "Registro de descargas",
+            value="\n".join(st.session_state.get("download_logs", [])),
+            height=220,
+            disabled=True,
+            key="download_log_area",
+        )
+
+    _render_download_logs()
+
+    progress_container = st.container()
 
     start_ts = int(
         datetime.combine(start_date, datetime.min.time(), tzinfo=timezone.utc).timestamp() * 1000
@@ -372,30 +382,48 @@ if current_tab == "📥 Datos":
         if not selected_symbols:
             st.warning("Debes seleccionar al menos un símbolo para descargar.")
         else:
-            st.session_state["logs"] = []
-            log_placeholder.text_area("Registro de descargas", value="", height=220, disabled=True)
+            st.info("Iniciando proceso de descarga desde Binance...")
+            st.session_state["download_logs"] = []
+            _render_download_logs()
 
-            for symbol in selected_symbols:
-                symbol_upper = symbol.upper()
-                extension = ".csv.gz" if compress else ".csv"
-                output_path = Path(f"data/history/{symbol_upper}_{interval}{extension}")
+            with progress_container:
+                status_box = st.status("Preparando descarga...", state="running")
+                progress_bar = st.progress(0, text="Preparando descarga...")
 
-                def _progress_callback(chunk, total_rows, sym=symbol_upper):
-                    timestamp = datetime.fromtimestamp(chunk.last_open_time_ms / 1000, tz=timezone.utc)
-                    message = (
-                        f"{sym} - Bloque de {chunk.count} velas descargado. "
-                        f"Última vela: {timestamp.strftime('%Y-%m-%d %H:%M:%S UTC')} (Total: {total_rows})"
+                for symbol in selected_symbols:
+                    symbol_upper = symbol.upper()
+                    extension = ".csv.gz" if compress else ".csv"
+                    output_path = Path(f"data/history/{symbol_upper}_{interval}{extension}")
+
+                    def append_log(message: str) -> None:
+                        st.session_state["download_logs"].append(message)
+                        st.session_state["download_logs"] = st.session_state["download_logs"][-200:]
+                        _render_download_logs()
+
+                    def _chunk_callback(chunk, total_rows, sym=symbol_upper):
+                        timestamp = datetime.fromtimestamp(chunk.last_open_time_ms / 1000, tz=timezone.utc)
+                        message = (
+                            f"{sym} - Bloque de {chunk.count} velas descargado. "
+                            f"Última vela: {timestamp.strftime('%Y-%m-%d %H:%M:%S UTC')} (Total acumulado: {total_rows})"
+                        )
+                        append_log(message)
+
+                    def _progress_update(pct: int, message: str | None, sym=symbol_upper) -> None:
+                        label = message or "Descarga en curso..."
+                        full_text = f"{sym} ({interval}) - {label}"
+                        state = "running" if pct < 100 else "complete"
+                        progress_bar.progress(pct, text=full_text)
+                        status_box.update(label=full_text, state=state)
+                        if pct >= 100:
+                            append_log(f"{sym} - Descarga completada correctamente.")
+
+                    status_box.update(
+                        label=f"Descarga de {symbol_upper} ({interval}) en preparación...",
+                        state="running",
                     )
-                    st.session_state["logs"].append(message)
-                    st.session_state["logs"] = st.session_state["logs"][-200:]
-                    log_placeholder.text_area(
-                        "Registro de descargas",
-                        value="\n".join(st.session_state["logs"]),
-                        height=220,
-                        disabled=True,
-                    )
+                    progress_bar.progress(0, text=f"{symbol_upper} ({interval}) - Iniciando descarga...")
+                    append_log(f"{symbol_upper} - Iniciando descarga para el intervalo {interval}.")
 
-                with st.spinner(f"Descargando datos para {symbol_upper} ({interval})..."):
                     try:
                         result_path = feed.download_to_csv(
                             symbol_upper,
@@ -403,14 +431,24 @@ if current_tab == "📥 Datos":
                             start_time=start_ts,
                             out_path=output_path,
                             compress=compress,
-                            progress_callback=_progress_callback,
+                            progress_callback=_progress_update,
+                            chunk_callback=_chunk_callback,
                         )
                         successful_downloads[symbol_upper] = result_path
                         st.success(f"✅ Datos de {symbol_upper} guardados en {result_path}")
+                        status_box.update(
+                            label=f"Descarga de {symbol_upper} ({interval}) finalizada.",
+                            state="complete",
+                        )
                     except Exception as exc:  # pragma: no cover - depende de red externa
                         error_message = f"❌ Error al descargar {symbol_upper}: {exc}"
                         errors.append(error_message)
                         st.error(error_message)
+                        status_box.update(
+                            label=f"Descarga de {symbol_upper} ({interval}) fallida.",
+                            state="error",
+                        )
+                        append_log(f"{symbol_upper} - Error durante la descarga: {exc}")
 
             if errors:
                 st.warning("Se encontraron problemas con algunos símbolos. Revisa los mensajes anteriores.")

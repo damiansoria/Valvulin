@@ -22,8 +22,8 @@ def _parse_start(value: str) -> int:
     return int(datetime.combine(date_obj, datetime.min.time(), tzinfo=timezone.utc).timestamp() * 1000)
 
 
-def _build_progress(symbol: str) -> Callable:
-    """Crear un callback de progreso que imprime actualizaciones en consola."""
+def _build_chunk_logger(symbol: str) -> Callable:
+    """Crear un callback que imprima el detalle de cada bloque descargado."""
 
     def _progress(chunk, total_rows):
         timestamp = datetime.fromtimestamp(chunk.last_open_time_ms / 1000, tz=timezone.utc)
@@ -31,6 +31,16 @@ def _build_progress(symbol: str) -> Callable:
             f"{symbol}: bloque de {chunk.count} velas. Último timestamp {timestamp.isoformat()} (total={total_rows})",
             flush=True,
         )
+
+    return _progress
+
+
+def _build_percent_logger(symbol: str) -> Callable:
+    """Crear un callback para la barra de progreso que se refleje en consola."""
+
+    def _progress(pct: int, message: str | None) -> None:
+        detail = f" - {message}" if message else ""
+        print(f"{symbol}: {pct}% completado{detail}", flush=True)
 
     return _progress
 
@@ -84,7 +94,8 @@ def main() -> None:
         start_time=args.start_date,
         out_path=output_path,
         compress=args.compress,
-        progress_callback=_build_progress(symbol),
+        progress_callback=_build_percent_logger(symbol),
+        chunk_callback=_build_chunk_logger(symbol),
     )
 
     if output.exists():
