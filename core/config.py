@@ -47,6 +47,7 @@ class DataFeedConfig:
     handler: str
     symbols: Sequence[str]
     parameters: Dict[str, Any] = field(default_factory=dict)
+    type: Optional[str] = None
 
 
 @dataclass
@@ -116,12 +117,15 @@ def _read_file(path: Path) -> Dict[str, Any]:
 def _build_data_feeds(raw: Iterable[Dict[str, Any]]) -> List[DataFeedConfig]:
     feeds = []
     for entry in raw:
+        parameters = entry.get("parameters") or entry.get("params") or {}
+        feed_type = entry.get("type")
         feeds.append(
             DataFeedConfig(
                 name=entry["name"],
-                handler=entry["handler"],
+                handler=entry.get("handler", ""),
                 symbols=entry.get("symbols", []),
-                parameters=entry.get("parameters", {}),
+                parameters=parameters,
+                type=feed_type,
             )
         )
     return feeds
