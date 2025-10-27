@@ -150,13 +150,22 @@ if tab == "📥 Datos":
 
     log_container = st.empty()
 
+    def _next_widget_key(base: str) -> str:
+        """Genera claves únicas y estables para widgets repetidos."""
+
+        counter_key = f"__{base}_counter"
+        counter = int(st.session_state.get(counter_key, 0))
+        st.session_state[counter_key] = counter + 1
+        return f"{base}_{counter}"
+
     def _render_download_logs() -> None:
-        log_container.text_area(
+        placeholder = log_container.empty()
+        placeholder.text_area(
             "Registro de descargas",
             value="\n".join(st.session_state.get("download_logs", [])),
             height=220,
             disabled=True,
-            key="download_log_area",
+            key=_next_widget_key("download_log_area"),
         )
 
     _render_download_logs()
