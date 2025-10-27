@@ -195,3 +195,8 @@ Desde ahí podrás:
 - Actualizar feeds en el `config.yaml` con un solo clic.
 
 Ejemplo visual: panel con controles de símbolo, intervalo, fecha inicial, botón de descarga, registro de progreso y estado del archivo descargado.
+
+### Panel de Backtesting Visual
+Desde la interfaz Streamlit (pestaña “Backtesting”) puedes ejecutar simulaciones completas
+de tus estrategias sobre datos descargados desde Binance.
+Incluye visualización de velas, entradas, salidas y métricas clave.
