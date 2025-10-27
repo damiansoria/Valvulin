@@ -40,6 +40,36 @@ python -m core.engine --config config.yaml \
     --disable-strategy ETHUSDT:15m:rsi-divergence
 ```
 
+## Descarga de datos históricos desde Binance
+
+- El feed `BinancePublicDataFeed` permite descargar velas OHLCV directamente desde el endpoint público de Binance **sin API key**.
+- Respeta los límites públicos de Binance (máximo de 1200 requests por minuto); el cliente incluye pausas y reintentos exponenciales automáticos.
+
+### Script de utilidad
+
+```bash
+python scripts/download_binance_data.py
+```
+
+Esto creará (o actualizará) `data/history/BTCUSDT_1h.csv` con datos desde el 1 de enero de 2024.
+
+### Uso en `config.yaml`
+
+```yaml
+data_feeds:
+  - name: binance-public
+    type: binance-public
+    params:
+      data_dir: data/history
+      cache: true
+```
+
+Cuando se utilice este feed desde el `engine`, se inicializará automáticamente sin credenciales adicionales:
+
+```bash
+python -m core.engine --config config.yaml
+```
+
 ## Ejecución en vivo
 
 ```bash

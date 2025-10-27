@@ -97,6 +97,13 @@ class DataFeedManager:
         self.logger = logger or logging.getLogger("valvulin.data_feed")
         self.feeds: List[DataFeedInstance] = []
         for config in configs:
+            if not config.handler:
+                self.logger.warning(
+                    "Skipping data feed '%s' without handler (type=%s)",
+                    config.name,
+                    config.type,
+                )
+                continue
             handler_cls = _import_handler(config.handler)
             handler = handler_cls(config.name, config.symbols, **config.parameters)
             self.feeds.append(DataFeedInstance(config=config, handler=handler))
