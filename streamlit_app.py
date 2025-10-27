@@ -9,217 +9,9 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 import yaml
-from plotly.subplots import make_subplots
 
 from analytics.backtest_visual import run_backtest
 from valvulin.data.binance_public import BinancePublicDataFeed
-
-
-def _list_history_symbols() -> Dict[str, List[str]]:
-    """Obtiene un diccionario {símbolo: [intervalos disponibles]} a partir de los archivos en disco."""
-
-    data_dir = Path("data/history")
-    symbols: Dict[str, set[str]] = {}
-    if not data_dir.exists():
-        return {}
-
-    for file_path in data_dir.glob("*.csv*"):
-        parts = file_path.name.split("_")
-        if len(parts) < 2:
-            continue
-        symbol = parts[0]
-        interval = parts[1].split(".")[0]
-        symbols.setdefault(symbol, set()).add(interval)
-
-    return {symbol: sorted(intervals) for symbol, intervals in symbols.items()}
-
-
-def _resolve_history_path(symbol: str, interval: str) -> Path | None:
-    """Devuelve la ruta del CSV (o CSV.GZ) para un símbolo e intervalo dado."""
-
-    data_dir = Path("data/history")
-    gz_path = data_dir / f"{symbol}_{interval}.csv.gz"
-    csv_path = data_dir / f"{symbol}_{interval}.csv"
-    if gz_path.exists():
-        return gz_path
-    if csv_path.exists():
-        return csv_path
-    return None
-
-
-def _load_history_dataframe(path: Path) -> pd.DataFrame:
-    """Carga un archivo CSV de datos históricos en un DataFrame."""
-
-    compression = "gzip" if path.suffix == ".gz" else None
-    return pd.read_csv(path, compression=compression)
-
-
-def _format_percentage(value: float | None) -> str:
-    """Formatea un valor porcentual manejando NaN o None."""
-
-    if value is None or pd.isna(value):
-        return "N/D"
-    return f"{value:.2f}%"
-
-
-def _format_ratio(value: float | None) -> str:
-    """Formatea un ratio como el profit factor."""
-
-    if value is None or pd.isna(value):
-        return "N/D"
-    if value == float("inf"):
-        return "∞"
-    return f"{value:.2f}"
-
-
-def _format_integer(value: float | None) -> str:
-    """Formatea un entero a texto."""
-
-    if value is None or pd.isna(value):
-        return "N/D"
-    return f"{int(value)}"
-
-
-def _create_backtest_chart(processed: pd.DataFrame, trades: pd.DataFrame, strategy: str) -> go.Figure:
-    """Construye el gráfico interactivo con velas, indicadores y señales."""
-
-    data = processed.copy()
-    data["timestamp"] = pd.to_datetime(data["timestamp"], utc=True, errors="coerce")
-    data.dropna(subset=["timestamp"], inplace=True)
-
-    rows = 2 if strategy == "RSI Oversold/Overbought" else 1
-    row_heights = [0.7, 0.3] if rows == 2 else [1.0]
-    fig = make_subplots(rows=rows, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=row_heights)
-
-    fig.add_trace(
-        go.Candlestick(
-            x=data["timestamp"],
-            open=data["open"],
-            high=data["high"],
-            low=data["low"],
-            close=data["close"],
-            name="Precio",
-            increasing_line_color="#089981",
-            decreasing_line_color="#f23645",
-        ),
-        row=1,
-        col=1,
-    )
-
-    if strategy == "SMA Crossover":
-        fig.add_trace(
-            go.Scatter(
-                x=data["timestamp"],
-                y=data.get("sma_fast"),
-                mode="lines",
-                name="SMA rápida",
-                line=dict(color="#00c3ff", width=1.8),
-            ),
-            row=1,
-            col=1,
-        )
-        fig.add_trace(
-            go.Scatter(
-                x=data["timestamp"],
-                y=data.get("sma_slow"),
-                mode="lines",
-                name="SMA lenta",
-                line=dict(color="#f1c40f", width=1.8),
-            ),
-            row=1,
-            col=1,
-        )
-    elif strategy == "Bollinger Bands Reversal":
-        fig.add_trace(
-            go.Scatter(
-                x=data["timestamp"],
-                y=data.get("bb_upper"),
-                mode="lines",
-                name="Banda superior",
-                line=dict(color="#ff6b6b", width=1.5, dash="dot"),
-            ),
-            row=1,
-            col=1,
-        )
-        fig.add_trace(
-            go.Scatter(
-                x=data["timestamp"],
-                y=data.get("bb_mid"),
-                mode="lines",
-                name="Media",
-                line=dict(color="#3498db", width=1.5),
-            ),
-            row=1,
-            col=1,
-        )
-        fig.add_trace(
-            go.Scatter(
-                x=data["timestamp"],
-                y=data.get("bb_lower"),
-                mode="lines",
-                name="Banda inferior",
-                line=dict(color="#2ecc71", width=1.5, dash="dot"),
-            ),
-            row=1,
-            col=1,
-        )
-    elif strategy == "RSI Oversold/Overbought":
-        fig.add_trace(
-            go.Scatter(
-                x=data["timestamp"],
-                y=data.get("rsi"),
-                mode="lines",
-                name="RSI",
-                line=dict(color="#9b59b6", width=1.8),
-            ),
-            row=2,
-            col=1,
-        )
-        fig.add_hline(y=70, line=dict(color="#e74c3c", width=1, dash="dash"), row=2, col=1)
-        fig.add_hline(y=30, line=dict(color="#2ecc71", width=1, dash="dash"), row=2, col=1)
-        fig.update_yaxes(title_text="RSI", range=[0, 100], row=2, col=1)
-
-    if not trades.empty:
-        entries = trades.copy()
-        entries["entry_time"] = pd.to_datetime(entries["entry_time"], utc=True)
-        entries.dropna(subset=["entry_time"], inplace=True)
-        exits = trades.copy()
-        exits["exit_time"] = pd.to_datetime(exits["exit_time"], utc=True)
-        exits.dropna(subset=["exit_time"], inplace=True)
-
-        if not entries.empty:
-            fig.add_trace(
-                go.Scatter(
-                    x=entries["entry_time"],
-                    y=entries["entry_price"],
-                    mode="markers",
-                    name="Entradas",
-                    marker=dict(symbol="triangle-up", size=12, color="#00cc96"),
-                ),
-                row=1,
-                col=1,
-            )
-        if not exits.empty:
-            fig.add_trace(
-                go.Scatter(
-                    x=exits["exit_time"],
-                    y=exits["exit_price"],
-                    mode="markers",
-                    name="Salidas",
-                    marker=dict(symbol="triangle-down", size=12, color="#ff3b30"),
-                ),
-                row=1,
-                col=1,
-            )
-
-    fig.update_layout(
-        margin=dict(l=20, r=20, t=50, b=20),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
-        hovermode="x unified",
-    )
-    fig.update_yaxes(title_text="Precio", row=1, col=1)
-    fig.update_xaxes(showgrid=True, row=rows, col=1)
-    return fig
 
 
 # Configuración inicial de la página
@@ -235,9 +27,9 @@ if "pending_feeds" not in st.session_state:
 st.title("📈 Valvulin - Bot de Trading y Backtesting")
 
 # Navegación lateral
-current_tab = st.sidebar.radio("📊 Sección", ["📥 Datos", "🔁 Backtesting", "⚙️ Configuración"])
+tab = st.sidebar.radio("📊 Sección", ["📥 Datos", "🔁 Backtesting", "⚙️ Configuración"])
 
-if current_tab == "📥 Datos":
+if tab == "📥 Datos":
     st.sidebar.header("⚙️ Configuración de datos")
     user_symbol = st.sidebar.text_input("Símbolo principal", value="BTCUSDT").upper().strip()
     predefined_symbols: List[str] = [
@@ -390,6 +182,20 @@ if current_tab == "📥 Datos":
                 status_box = st.status("Preparando descarga...", state="running")
                 progress_bar = st.progress(0, text="Preparando descarga...")
 
+                def safe_progress_update(pct: int, msg: str = "") -> None:
+                    """Actualiza la barra de progreso sin interrumpir la app si el widget ya no existe."""
+
+                    text = f"Descargando... {pct}% {msg}".strip()
+                    try:
+                        progress_bar.progress(pct, text=text)
+                    except Exception:
+                        pass
+                    try:
+                        state = "running" if pct < 100 else "complete"
+                        status_box.update(label=text, state=state)
+                    except Exception:
+                        pass
+
                 for symbol in selected_symbols:
                     symbol_upper = symbol.upper()
                     extension = ".csv.gz" if compress else ".csv"
@@ -401,28 +207,35 @@ if current_tab == "📥 Datos":
                         _render_download_logs()
 
                     def _chunk_callback(chunk, total_rows, sym=symbol_upper):
-                        timestamp = datetime.fromtimestamp(chunk.last_open_time_ms / 1000, tz=timezone.utc)
+                        timestamp = datetime.fromtimestamp(
+                            chunk.last_open_time_ms / 1000, tz=timezone.utc
+                        )
                         message = (
                             f"{sym} - Bloque de {chunk.count} velas descargado. "
                             f"Última vela: {timestamp.strftime('%Y-%m-%d %H:%M:%S UTC')} (Total acumulado: {total_rows})"
                         )
                         append_log(message)
 
-                    def _progress_update(pct: int, message: str | None, sym=symbol_upper) -> None:
-                        label = message or "Descarga en curso..."
-                        full_text = f"{sym} ({interval}) - {label}"
-                        state = "running" if pct < 100 else "complete"
-                        progress_bar.progress(pct, text=full_text)
-                        status_box.update(label=full_text, state=state)
-                        if pct >= 100:
-                            append_log(f"{sym} - Descarga completada correctamente.")
-
-                    status_box.update(
-                        label=f"Descarga de {symbol_upper} ({interval}) en preparación...",
-                        state="running",
-                    )
-                    progress_bar.progress(0, text=f"{symbol_upper} ({interval}) - Iniciando descarga...")
+                    try:
+                        status_box.update(
+                            label=f"Descarga de {symbol_upper} ({interval}) en preparación...",
+                            state="running",
+                        )
+                    except Exception:
+                        pass
+                    safe_progress_update(0, f"{symbol_upper} {interval}")
                     append_log(f"{symbol_upper} - Iniciando descarga para el intervalo {interval}.")
+
+                    progress_callback = (
+                        lambda pct, message=None, sym=symbol_upper: safe_progress_update(
+                            pct,
+                            " ".join(
+                                part
+                                for part in [f"{sym} {interval}", (message or "").strip()]
+                                if part
+                            ),
+                        )
+                    )
 
                     try:
                         result_path = feed.download_to_csv(
@@ -431,23 +244,25 @@ if current_tab == "📥 Datos":
                             start_time=start_ts,
                             out_path=output_path,
                             compress=compress,
-                            progress_callback=_progress_update,
+                            progress_callback=progress_callback,
                             chunk_callback=_chunk_callback,
                         )
                         successful_downloads[symbol_upper] = result_path
+                        safe_progress_update(100, f"{symbol_upper} {interval} ✅")
+                        append_log(f"{symbol_upper} - Descarga completada correctamente.")
                         st.success(f"✅ Datos de {symbol_upper} guardados en {result_path}")
-                        status_box.update(
-                            label=f"Descarga de {symbol_upper} ({interval}) finalizada.",
-                            state="complete",
-                        )
                     except Exception as exc:  # pragma: no cover - depende de red externa
                         error_message = f"❌ Error al descargar {symbol_upper}: {exc}"
                         errors.append(error_message)
                         st.error(error_message)
-                        status_box.update(
-                            label=f"Descarga de {symbol_upper} ({interval}) fallida.",
-                            state="error",
-                        )
+                        safe_progress_update(100, f"{symbol_upper} {interval} ❌")
+                        try:
+                            status_box.update(
+                                label=f"Descarga de {symbol_upper} ({interval}) fallida.",
+                                state="error",
+                            )
+                        except Exception:
+                            pass
                         append_log(f"{symbol_upper} - Error durante la descarga: {exc}")
 
             if errors:
@@ -506,144 +321,55 @@ if current_tab == "📥 Datos":
         for error in errors:
             st.error(error)
 
-elif current_tab == "🔁 Backtesting":
-    st.write("### 🔁 Backtesting visual")
-    st.info(
-        "Selecciona el activo, la estrategia y los parámetros para ejecutar un backtest interactivo sobre tus datos históricos."
-    )
+elif tab == "🔁 Backtesting":
+    st.title("🔁 Backtesting Visual")
 
-    available_map = _list_history_symbols()
-    default_symbols = [
-        "BTCUSDT",
-        "ETHUSDT",
-        "BNBUSDT",
-        "SOLUSDT",
-        "XRPUSDT",
-    ]
-    symbol_options = sorted(set(list(available_map.keys()) + default_symbols)) or default_symbols
+    symbol = st.selectbox("Símbolo", ["BTCUSDT", "ETHUSDT"])
+    interval = st.selectbox("Intervalo", ["1h", "4h", "1d"])
+    strategy = st.selectbox("Estrategia", ["SMA Crossover", "RSI", "Bollinger Bands"])
 
-    today = datetime.now(timezone.utc).date()
-    default_start = today - timedelta(days=90)
-    strategy_options = [
-        "SMA Crossover",
-        "RSI Oversold/Overbought",
-        "Bollinger Bands Reversal",
-    ]
+    params: Dict[str, float] = {}
+    if strategy == "SMA Crossover":
+        params["fast"] = st.number_input("SMA rápida", 5, 100, 20)
+        params["slow"] = st.number_input("SMA lenta", 10, 200, 50)
+    elif strategy == "RSI":
+        params["period"] = st.number_input("Periodo RSI", 5, 50, 14)
+    elif strategy == "Bollinger Bands":
+        params["period"] = st.number_input("Periodo", 5, 50, 20)
+        params["std_mult"] = st.number_input("Desviaciones estándar", 1.0, 3.0, 2.0)
 
-    with st.form("backtest_form"):
-        st.subheader("Configura tu simulación")
-        col_symbol, col_interval, col_strategy = st.columns(3)
-        selected_symbol = col_symbol.selectbox("Símbolo", symbol_options, index=0)
-        interval_choices = available_map.get(selected_symbol, ["1m", "5m", "15m", "1h", "4h", "1d"])
-        default_interval_index = interval_choices.index("1h") if "1h" in interval_choices else 0
-        selected_interval = col_interval.selectbox("Intervalo", interval_choices, index=default_interval_index)
-        selected_strategy = col_strategy.selectbox("Estrategia", strategy_options)
+    file_path = Path(f"data/history/{symbol}_{interval}.csv")
+    if not file_path.exists():
+        st.warning(
+            "No hay datos descargados para este símbolo e intervalo. Descárgalos primero en la pestaña 📥 Datos."
+        )
+    else:
+        df = pd.read_csv(file_path)
+        if st.button("▶️ Ejecutar Backtest"):
+            result = run_backtest(df, strategy, params)
+            st.success("✅ Backtest completado.")
 
-        col_start, col_end, _ = st.columns(3)
-        selected_start = col_start.date_input("Fecha inicio", default_start)
-        selected_end = col_end.date_input("Fecha fin", today)
+            st.subheader("📈 Métricas")
+            st.json(result["metrics"])
 
-        st.write("#### Parámetros de la estrategia")
-        params: Dict[str, float] = {}
-        if selected_strategy == "SMA Crossover":
-            fast_col, slow_col = st.columns(2)
-            params["sma_fast"] = fast_col.number_input("SMA rápida", min_value=2, max_value=200, value=20)
-            params["sma_slow"] = slow_col.number_input("SMA lenta", min_value=3, max_value=400, value=50)
-        elif selected_strategy == "RSI Oversold/Overbought":
-            period_col, lower_col, upper_col = st.columns(3)
-            params["rsi_period"] = period_col.number_input("Periodo RSI", min_value=2, max_value=100, value=14)
-            params["rsi_lower"] = lower_col.number_input("Umbral sobreventa", min_value=5, max_value=50, value=30)
-            params["rsi_upper"] = upper_col.number_input("Umbral sobrecompra", min_value=50, max_value=95, value=70)
-        elif selected_strategy == "Bollinger Bands Reversal":
-            window_col, std_col = st.columns(2)
-            params["bb_window"] = window_col.number_input("Ventana", min_value=5, max_value=200, value=20)
-            params["bb_std"] = std_col.number_input("Desviaciones estándar", min_value=1.0, max_value=4.0, value=2.0, step=0.1)
+            fig = go.Figure(
+                data=[
+                    go.Candlestick(
+                        x=df["open_time"],
+                        open=df["open"],
+                        high=df["high"],
+                        low=df["low"],
+                        close=df["close"],
+                    )
+                ]
+            )
+            st.plotly_chart(fig, use_container_width=True)
 
-        submitted = st.form_submit_button("▶️ Ejecutar Backtest")
+            st.subheader("📊 Curva de Equity")
+            st.line_chart(result["equity_curve"]["equity"])
 
-    if submitted:
-        if selected_start > selected_end:
-            st.error("La fecha de inicio debe ser anterior a la fecha de fin.")
-        else:
-            history_path = _resolve_history_path(selected_symbol, selected_interval)
-            if history_path is None:
-                st.warning(
-                    "No se encontró un archivo de datos para el símbolo e intervalo seleccionados. Descarga primero el histórico desde la pestaña de Datos."
-                )
-            else:
-                try:
-                    raw_data = _load_history_dataframe(history_path)
-                except Exception as exc:  # pragma: no cover - lectura de archivos externos
-                    st.error(f"No se pudo cargar el archivo de datos: {exc}")
-                    raw_data = pd.DataFrame()
-
-                if not raw_data.empty:
-                    raw_data["open_time"] = pd.to_datetime(raw_data["open_time"], utc=True, errors="coerce")
-                    raw_data.dropna(subset=["open_time"], inplace=True)
-                    start_dt = datetime.combine(selected_start, datetime.min.time()).replace(tzinfo=timezone.utc)
-                    end_dt = datetime.combine(selected_end, datetime.max.time()).replace(tzinfo=timezone.utc)
-                    filtered = raw_data[(raw_data["open_time"] >= start_dt) & (raw_data["open_time"] <= end_dt)].copy()
-
-                    if filtered.empty:
-                        st.warning("El rango seleccionado no contiene datos. Ajusta las fechas o descarga más histórico.")
-                    else:
-                        with st.spinner("Ejecutando backtest..."):
-                            try:
-                                result = run_backtest(filtered, selected_strategy, params)
-                            except Exception as exc:
-                                st.error(f"Ocurrió un error durante el backtest: {exc}")
-                                result = None
-
-                        if result:
-                            trades_df: pd.DataFrame = result.get("trades", pd.DataFrame())
-                            metrics: Dict[str, float] = result.get("metrics", {})
-                            equity_curve: pd.DataFrame = result.get("equity_curve", pd.DataFrame())
-                            processed = result.get("processed_data", filtered)
-
-                            st.write("### 📊 Métricas del backtest")
-                            metric_cols = st.columns(5)
-                            metric_cols[0].metric("Ganancia acumulada", _format_percentage(metrics.get("total_return_pct")))
-                            metric_cols[1].metric("Profit factor", _format_ratio(metrics.get("profit_factor")))
-                            metric_cols[2].metric("Winrate", _format_percentage(metrics.get("winrate")))
-                            metric_cols[3].metric("Operaciones", _format_integer(metrics.get("num_trades")))
-                            metric_cols[4].metric("Drawdown máximo", _format_percentage(metrics.get("max_drawdown_pct")))
-
-                            st.write("### 📈 Gráfico interactivo")
-                            chart = _create_backtest_chart(processed, trades_df, selected_strategy)
-                            st.plotly_chart(chart, use_container_width=True)
-
-                            if not equity_curve.empty:
-                                st.write("### 📉 Curva de equity")
-                                equity_curve_sorted = equity_curve.copy()
-                                equity_curve_sorted["timestamp"] = pd.to_datetime(
-                                    equity_curve_sorted["timestamp"], utc=True, errors="coerce"
-                                )
-                                equity_curve_sorted.dropna(subset=["timestamp"], inplace=True)
-                                st.line_chart(
-                                    equity_curve_sorted.set_index("timestamp")["equity"],
-                                    use_container_width=True,
-                                )
-
-                            st.write("### 🧾 Operaciones ejecutadas")
-                            if not trades_df.empty:
-                                trades_to_show = trades_df.copy()
-                                trades_to_show["entry_time"] = pd.to_datetime(trades_to_show["entry_time"], utc=True)
-                                trades_to_show["exit_time"] = pd.to_datetime(trades_to_show["exit_time"], utc=True)
-                                trades_to_show["return_pct"] = trades_to_show["return_pct"].round(2)
-                                trades_to_show["duracion_min"] = trades_to_show["duracion_min"].round(2)
-                                st.dataframe(trades_to_show, use_container_width=True)
-
-                                csv_data = trades_to_show.to_csv(index=False).encode("utf-8")
-                                st.download_button(
-                                    "💾 Descargar operaciones en CSV",
-                                    data=csv_data,
-                                    file_name=f"{selected_symbol}_{selected_interval}_{selected_strategy.replace(' ', '_')}.csv",
-                                    mime="text/csv",
-                                )
-                            else:
-                                st.info("La estrategia no generó operaciones en el periodo seleccionado.")
-                else:
-                    st.warning("El archivo de datos está vacío o no se pudo leer correctamente.")
+            st.subheader("🧾 Operaciones")
+            st.dataframe(result["trades"])
 
 else:
     st.write("### ⚙️ Configuración y ayuda")
