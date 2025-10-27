@@ -25,6 +25,10 @@ class TradeRecord:
     pnl: float
     r_multiple: Optional[float]
     status: OrderStatus
+    pnl_pct: float = 0.0
+    risk_amount: float = 0.0
+    entry_equity: float = 0.0
+    exit_equity: float = 0.0
 
     def as_dict(self) -> dict:
         """Return the trade as a serialisable dictionary."""
@@ -40,6 +44,10 @@ class TradeRecord:
             "pnl": self.pnl,
             "r_multiple": self.r_multiple,
             "status": self.status,
+            "pnl_pct": self.pnl_pct,
+            "risk_amount": self.risk_amount,
+            "entry_equity": self.entry_equity,
+            "exit_equity": self.exit_equity,
         }
 
 
@@ -49,12 +57,19 @@ class BacktestResult:
 
     trades: List[TradeRecord]
     equity_curve: pd.Series
+    drawdown_curve: pd.Series
     win_rate: float
     average_r_multiple: float
     profit_factor: float
     max_drawdown: float
+    max_drawdown_pct: float
     expectancy: float
     cumulative_return: float
+    cumulative_return_pct: float
+    final_equity: float
+    total_trades: int
+    winning_trades: int
+    losing_trades: int
 
     def trades_frame(self) -> pd.DataFrame:
         """Return the list of trades as a :class:`pandas.DataFrame`."""
@@ -65,12 +80,18 @@ class BacktestResult:
         """Return a dictionary with the key performance metrics of the run."""
 
         return {
+            "total_trades": self.total_trades,
+            "winning_trades": self.winning_trades,
+            "losing_trades": self.losing_trades,
             "win_rate": self.win_rate,
             "average_r_multiple": self.average_r_multiple,
             "profit_factor": self.profit_factor,
             "max_drawdown": self.max_drawdown,
+            "max_drawdown_pct": self.max_drawdown_pct,
             "expectancy": self.expectancy,
             "cumulative_return": self.cumulative_return,
+            "cumulative_return_pct": self.cumulative_return_pct,
+            "final_equity": self.final_equity,
         }
 
 
@@ -87,46 +108,97 @@ class Backtester:
         self.ohlcv = ohlcv.sort_index()
         self.price_column = price_column
 
-    def run(self, signals: Iterable[TradeSignal]) -> BacktestResult:
+    def run(
+        self,
+        signals: Iterable[TradeSignal],
+        *,
+        initial_equity: float = 1_000.0,
+        risk_per_trade_pct: float = 1.0,
+    ) -> BacktestResult:
         """Simulate the provided trade ``signals`` over the stored OHLCV data."""
 
         trades: List[TradeRecord] = []
         equity_values: List[float] = []
         equity_index: List[datetime] = []
-        equity = 0.0
+
+        if initial_equity <= 0:
+            raise ValueError("initial_equity must be positive")
+        if risk_per_trade_pct < 0:
+            raise ValueError("risk_per_trade_pct must be non-negative")
+
+        equity = float(initial_equity)
+        if not self.ohlcv.empty:
+            equity_index.append(self.ohlcv.index[0].to_pydatetime())
+            equity_values.append(equity)
+        else:
+            equity_values.append(equity)
+
+        risk_fraction = float(risk_per_trade_pct) / 100
 
         for signal in signals:
-            record = self._simulate_signal(signal)
+            record = self._simulate_signal(signal, equity, risk_fraction)
             if record is None:
                 continue
             trades.append(record)
-            equity += record.pnl
+            equity = record.exit_equity
             equity_values.append(equity)
             equity_index.append(record.exit_time)
 
+        total_trades = len(trades)
+        winning_trades = sum(1 for trade in trades if trade.pnl > 0)
+        losing_trades = sum(1 for trade in trades if trade.pnl < 0)
         win_rate = self._compute_win_rate(trades)
         average_r = self._compute_average_r(trades)
         profit_factor = self._compute_profit_factor(trades)
         expectancy = self._compute_expectancy(trades)
-        max_drawdown = self._compute_drawdown(equity_values)
-        cumulative_return = equity_values[-1] if equity_values else 0.0
 
-        equity_curve = pd.Series(
-            equity_values, index=pd.to_datetime(equity_index), name="equity"
+        if equity_index and len(equity_index) == len(equity_values):
+            equity_curve = pd.Series(
+                equity_values, index=pd.to_datetime(equity_index), name="equity"
+            )
+        else:
+            equity_curve = pd.Series(equity_values, name="equity")
+
+        if equity_curve.empty:
+            equity_curve = pd.Series([initial_equity], name="equity")
+
+        equity_cummax = equity_curve.cummax()
+        drawdown_curve = (equity_cummax - equity_curve).fillna(0.0)
+        drawdown_pct_curve = (
+            (drawdown_curve / equity_cummax.replace(0.0, np.nan)).fillna(0.0)
+        )
+
+        max_drawdown = float(drawdown_curve.max()) if not drawdown_curve.empty else 0.0
+        max_drawdown_pct = (
+            float(drawdown_pct_curve.max()) * 100 if not drawdown_pct_curve.empty else 0.0
+        )
+        final_equity = float(equity_curve.iloc[-1]) if not equity_curve.empty else equity
+        cumulative_return = final_equity - float(initial_equity)
+        cumulative_return_pct = (
+            (final_equity / float(initial_equity) - 1) * 100 if initial_equity else 0.0
         )
 
         return BacktestResult(
             trades=trades,
             equity_curve=equity_curve,
+            drawdown_curve=drawdown_pct_curve,
             win_rate=win_rate,
             average_r_multiple=average_r,
             profit_factor=profit_factor,
             max_drawdown=max_drawdown,
+            max_drawdown_pct=max_drawdown_pct,
             expectancy=expectancy,
             cumulative_return=cumulative_return,
+            cumulative_return_pct=cumulative_return_pct,
+            final_equity=final_equity,
+            total_trades=total_trades,
+            winning_trades=winning_trades,
+            losing_trades=losing_trades,
         )
 
-    def _simulate_signal(self, signal: TradeSignal) -> Optional[TradeRecord]:
+    def _simulate_signal(
+        self, signal: TradeSignal, account_equity: float, risk_fraction: float
+    ) -> Optional[TradeRecord]:
         entry_position = int(self.ohlcv.index.searchsorted(signal.timestamp))
         if entry_position >= len(self.ohlcv.index):
             return None
@@ -148,11 +220,22 @@ class Backtester:
         exit_time, exit_price, status = self._simulate_exit(
             signal, entry_price, entry_df
         )
-        quantity = signal.quantity
+
+        target_risk = max(account_equity * risk_fraction, 0.0)
+        quantity, risk_amount = self._position_size(
+            entry_price, signal.stop_loss, signal.quantity, target_risk
+        )
+
         pnl = self._compute_pnl(signal.side, entry_price, exit_price, quantity)
         r_multiple = self._compute_r_multiple(
             signal.side, entry_price, exit_price, signal.stop_loss
         )
+        if r_multiple is None and risk_amount > 0:
+            r_multiple = pnl / risk_amount
+
+        entry_equity = account_equity
+        exit_equity = account_equity + pnl
+        pnl_pct = pnl / account_equity if account_equity > 0 else 0.0
 
         return TradeRecord(
             signal=signal,
@@ -164,7 +247,45 @@ class Backtester:
             pnl=pnl,
             r_multiple=r_multiple,
             status=status,
+            pnl_pct=pnl_pct,
+            risk_amount=risk_amount,
+            entry_equity=entry_equity,
+            exit_equity=exit_equity,
         )
+
+    @staticmethod
+    def _position_size(
+        entry_price: float,
+        stop_price: Optional[float],
+        requested_quantity: float,
+        target_risk: float,
+    ) -> tuple[float, float]:
+        quantity = max(float(requested_quantity), 0.0)
+        actual_risk = max(float(target_risk), 0.0)
+
+        if target_risk <= 0:
+            return quantity if quantity > 0 else 0.0, 0.0
+
+        if stop_price is not None:
+            risk_per_unit = abs(entry_price - float(stop_price))
+            if risk_per_unit > 0:
+                desired_quantity = target_risk / risk_per_unit
+                if quantity > 0:
+                    quantity = min(quantity, desired_quantity)
+                    actual_risk = risk_per_unit * quantity
+                else:
+                    quantity = desired_quantity
+                    actual_risk = target_risk
+                return quantity, actual_risk
+
+        if quantity > 0:
+            return quantity, actual_risk if stop_price is not None else target_risk
+
+        if entry_price > 0:
+            qty = target_risk / entry_price
+            return qty, target_risk
+
+        return 0.0, 0.0
 
     def _find_limit_entry(
         self, signal: TradeSignal, start_position: int
@@ -248,20 +369,6 @@ class Backtester:
             return None
         reward = exit_price - entry_price if side == "BUY" else entry_price - exit_price
         return reward / risk
-
-    @staticmethod
-    def _compute_drawdown(equity_curve: Sequence[float]) -> float:
-        if not equity_curve:
-            return 0.0
-        if isinstance(equity_curve, np.ndarray):
-            equity_array = equity_curve.astype(float, copy=False)
-        else:
-            equity_array = np.asarray(equity_curve, dtype=float)
-        equity_array = np.concatenate(([0.0], equity_array))
-        peaks = np.maximum.accumulate(equity_array)
-        peaks[peaks == 0] = 1.0
-        drawdowns = (equity_array - peaks) / peaks
-        return float(drawdowns.min())
 
     @staticmethod
     def _compute_win_rate(trades: Sequence[TradeRecord]) -> float:

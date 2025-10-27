@@ -80,34 +80,67 @@ def calculate_metrics(trades_df: pd.DataFrame, equity_curve: pd.Series) -> Dict[
     """Calcula métricas avanzadas inspiradas en TradingView."""
 
     total_trades = len(trades_df)
-    wins = trades_df[trades_df["pnl"] > 0]
-    losses = trades_df[trades_df["pnl"] <= 0]
+    wins = trades_df[trades_df["pnl_usd"] > 0]
+    losses = trades_df[trades_df["pnl_usd"] < 0]
+
+    total_return_pct = (
+        (equity_curve.iloc[-1] / equity_curve.iloc[0] - 1) * 100
+        if len(equity_curve) > 1
+        else 0.0
+    )
+    total_return_usd = float(equity_curve.iloc[-1] - equity_curve.iloc[0])
+
+    equity_cummax = equity_curve.cummax()
+    drawdown_curve = equity_cummax - equity_curve
+    drawdown_pct = (drawdown_curve / equity_cummax.replace(0, np.nan)).fillna(0)
+    max_drawdown_usd = float(drawdown_curve.max()) if not drawdown_curve.empty else 0.0
+    max_drawdown_pct = float(drawdown_pct.max() * 100) if not drawdown_pct.empty else 0.0
+
+    r_values = trades_df["r_multiple"].dropna()
+    avg_r = float(r_values.mean()) if not r_values.empty else 0.0
+    avg_win_r = float(r_values[r_values > 0].mean()) if (r_values > 0).any() else 0.0
+    avg_loss_r = float(r_values[r_values < 0].mean()) if (r_values < 0).any() else 0.0
+    winrate = (len(wins) / total_trades * 100) if total_trades else 0.0
+    lossrate = 100 - winrate if total_trades else 0.0
+    expectancy_r = (
+        (winrate / 100) * avg_win_r + (lossrate / 100) * avg_loss_r
+        if total_trades
+        else 0.0
+    )
+
+    gross_profit = wins["pnl_usd"].sum()
+    gross_loss = abs(losses["pnl_usd"].sum())
+    profit_factor = float(gross_profit / gross_loss) if gross_loss > 0 else np.inf
+
+    avg_trade_pct = float(trades_df["pnl"].mean() * 100) if total_trades else 0.0
+    median_trade_pct = float(trades_df["pnl"].median() * 100) if total_trades else 0.0
+    sharpe_ratio = 0.0
+    if total_trades > 1:
+        pnl_std = trades_df["pnl"].std(ddof=0)
+        if pnl_std > 0:
+            sharpe_ratio = float((trades_df["pnl"].mean() / pnl_std) * np.sqrt(252))
 
     metrics = {
         "Total Trades": total_trades,
-        "Winning Trades": len(wins),
-        "Losing Trades": len(losses),
-        "Winrate %": round((len(wins) / total_trades) * 100, 2) if total_trades else 0.0,
-        "Profit Factor": round(
-            wins["pnl"].sum() / abs(losses["pnl"].sum()) if len(losses) > 0 else np.inf,
-            2,
-        ),
-        "Total Return %": round((equity_curve.iloc[-1] / equity_curve.iloc[0] - 1) * 100, 2)
-        if len(equity_curve) > 1
+        "Winning Trades": int(len(wins)),
+        "Losing Trades": int(len(losses)),
+        "Winrate %": round(winrate, 2),
+        "Profit Factor": round(profit_factor, 2) if np.isfinite(profit_factor) else np.inf,
+        "Average R Multiple": round(avg_r, 3),
+        "Expectancy R": round(expectancy_r, 3),
+        "Average Trade %": round(avg_trade_pct, 3),
+        "Median Trade %": round(median_trade_pct, 3),
+        "Max Drawdown %": round(max_drawdown_pct, 2),
+        "Max Drawdown $": round(max_drawdown_usd, 2),
+        "Total Return %": round(total_return_pct, 2),
+        "Total Return $": round(total_return_usd, 2),
+        "Equity Final $": round(float(equity_curve.iloc[-1]), 2),
+        "Equity Final %": round(total_return_pct, 2),
+        "Average Risk $": round(float(trades_df["risk_usd"].mean()), 2)
+        if "risk_usd" in trades_df
+        and not trades_df["risk_usd"].empty
         else 0.0,
-        "Max Drawdown %": round((1 - equity_curve / equity_curve.cummax()).max() * 100, 2),
-        "Average Win %": round(wins["pnl"].mean() * 100, 2) if len(wins) else 0.0,
-        "Average Loss %": round(losses["pnl"].mean() * 100, 2) if len(losses) else 0.0,
-        "Largest Win %": round(wins["pnl"].max() * 100, 2) if len(wins) else 0.0,
-        "Largest Loss %": round(losses["pnl"].min() * 100, 2) if len(losses) else 0.0,
-        "Expectancy %": round(trades_df["pnl"].mean() * 100, 2) if total_trades else 0.0,
-        "Sharpe Ratio": round(
-            (trades_df["pnl"].mean() / trades_df["pnl"].std()) * np.sqrt(252),
-            2,
-        )
-        if trades_df["pnl"].std() > 0
-        else 0.0,
-        "Equity Final": round(float(equity_curve.iloc[-1]), 2),
+        "Sharpe Ratio": round(sharpe_ratio, 2),
     }
     return metrics
 
@@ -126,6 +159,7 @@ def run_backtest(
     params: Dict[str, Dict[str, float]] | Dict[str, float] | None,
     capital_inicial: float = 1_000.0,
     riesgo_por_trade: float = 1.0,
+    stop_loss_pct: float = 2.0,
     logica: str = "AND",
 ) -> StrategyResult:
     """Ejecuta un backtest incorporando simulación monetaria y métricas completas."""
@@ -177,8 +211,10 @@ def run_backtest(
     entry_price = 0.0
     entry_time: pd.Timestamp | None = None
     entry_capital = capital
+    entry_risk_amount = capital * (float(riesgo_por_trade) / 100)
 
     riesgo_fraccion = float(riesgo_por_trade) / 100
+    stop_loss_fraction = float(stop_loss_pct) / 100 if stop_loss_pct > 0 else None
 
     for _, row in df.iterrows():
         signal = int(row.get("signal", 0))
@@ -191,14 +227,20 @@ def run_backtest(
                 entry_price = price
                 entry_time = timestamp
                 entry_capital = capital
+                entry_risk_amount = entry_capital * riesgo_fraccion
         else:
             if signal == position:
                 continue
 
             trade_return = (price - entry_price) / entry_price * position
-            pnl_pct = trade_return * riesgo_fraccion
-            pnl_usd = capital * pnl_pct
-            capital *= 1 + pnl_pct
+            risk_amount = entry_risk_amount
+            if stop_loss_fraction and stop_loss_fraction > 0:
+                r_multiple = trade_return / stop_loss_fraction
+            else:
+                r_multiple = trade_return
+            pnl_usd = risk_amount * r_multiple
+            capital += pnl_usd
+            pnl_pct = pnl_usd / entry_capital if entry_capital else 0.0
             trades.append(
                 {
                     "entrada": entry_time,
@@ -207,8 +249,10 @@ def run_backtest(
                     "precio_entrada": round(entry_price, 6),
                     "precio_salida": round(price, 6),
                     "retorno_activo_%": round(trade_return * 100, 4),
-                    "pnl": pnl_pct,
+                    "pnl": round(pnl_pct, 6),
                     "pnl_usd": round(pnl_usd, 4),
+                    "r_multiple": round(r_multiple, 4),
+                    "risk_usd": round(risk_amount, 4),
                     "capital_inicial": round(entry_capital, 4),
                     "capital_final": round(capital, 4),
                 }
@@ -224,15 +268,21 @@ def run_backtest(
                 entry_price = price
                 entry_time = timestamp
                 entry_capital = capital
+                entry_risk_amount = entry_capital * riesgo_fraccion
 
     if position != 0 and entry_price > 0:
         last_row = df.iloc[-1]
         price = float(last_row.get("close", entry_price))
         timestamp = last_row.get("open_time")
         trade_return = (price - entry_price) / entry_price * position
-        pnl_pct = trade_return * riesgo_fraccion
-        pnl_usd = capital * pnl_pct
-        capital *= 1 + pnl_pct
+        risk_amount = entry_risk_amount
+        if stop_loss_fraction and stop_loss_fraction > 0:
+            r_multiple = trade_return / stop_loss_fraction
+        else:
+            r_multiple = trade_return
+        pnl_usd = risk_amount * r_multiple
+        capital += pnl_usd
+        pnl_pct = pnl_usd / entry_capital if entry_capital else 0.0
         trades.append(
             {
                 "entrada": entry_time,
@@ -241,8 +291,10 @@ def run_backtest(
                 "precio_entrada": round(entry_price, 6),
                 "precio_salida": round(price, 6),
                 "retorno_activo_%": round(trade_return * 100, 4),
-                "pnl": pnl_pct,
+                "pnl": round(pnl_pct, 6),
                 "pnl_usd": round(pnl_usd, 4),
+                "r_multiple": round(r_multiple, 4),
+                "risk_usd": round(risk_amount, 4),
                 "capital_inicial": round(entry_capital, 4),
                 "capital_final": round(capital, 4),
             }
@@ -256,10 +308,14 @@ def run_backtest(
         trades_df["salida"] = pd.to_datetime(trades_df["salida"], errors="coerce")
 
     equity_curve = pd.Series(equity_values, name="capital")
-    drawdown = 1 - equity_curve / equity_curve.cummax()
+    equity_cummax = equity_curve.cummax().replace(0, np.nan)
+    drawdown = 1 - equity_curve / equity_cummax
+    drawdown = drawdown.fillna(0.0)
 
     metrics = calculate_metrics(
-        trades_df if not trades_df.empty else pd.DataFrame(columns=["pnl"]),
+        trades_df
+        if not trades_df.empty
+        else pd.DataFrame(columns=["pnl", "pnl_usd", "r_multiple", "risk_usd"]),
         equity_curve,
     )
 
