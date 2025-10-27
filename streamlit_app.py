@@ -5,7 +5,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Iterable, List
 
+import numpy as np
 import pandas as pd
+import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 import yaml
@@ -335,50 +337,246 @@ elif tab == "🔁 Backtesting":
 
     symbol = st.selectbox("Símbolo", ["BTCUSDT", "ETHUSDT"])
     interval = st.selectbox("Intervalo", ["1h", "4h", "1d"])
-    strategy = st.selectbox("Estrategia", ["SMA Crossover", "RSI", "Bollinger Bands"])
 
-    params: Dict[str, float] = {}
-    if strategy == "SMA Crossover":
-        params["fast"] = st.number_input("SMA rápida", 5, 100, 20)
-        params["slow"] = st.number_input("SMA lenta", 10, 200, 50)
-    elif strategy == "RSI":
-        params["period"] = st.number_input("Periodo RSI", 5, 50, 14)
-    elif strategy == "Bollinger Bands":
-        params["period"] = st.number_input("Periodo", 5, 50, 20)
-        params["std_mult"] = st.number_input("Desviaciones estándar", 1.0, 3.0, 2.0)
+    capital_inicial = st.number_input(
+        "💰 Capital inicial (USDT)", min_value=10.0, value=1000.0, step=10.0
+    )
+    riesgo_por_trade = st.number_input(
+        "🎯 Riesgo por operación (%)", min_value=0.1, value=1.0, step=0.1
+    )
+
+    estrategias_seleccionadas = st.multiselect(
+        "🧩 Estrategias a combinar",
+        ["SMA Crossover", "RSI", "Bollinger Bands"],
+        default=["SMA Crossover"],
+    )
+    logica_combinacion = st.selectbox("Lógica de combinación", ["AND", "OR"])
+
+    strategy_params: Dict[str, Dict[str, float]] = {}
+    for estrategia in estrategias_seleccionadas:
+        with st.expander(f"⚙️ Parámetros {estrategia}"):
+            if estrategia == "SMA Crossover":
+                fast = st.number_input(
+                    "SMA rápida",
+                    min_value=5,
+                    max_value=200,
+                    value=20,
+                    step=1,
+                    key=f"sma_fast_{estrategia}",
+                )
+                slow = st.number_input(
+                    "SMA lenta",
+                    min_value=10,
+                    max_value=300,
+                    value=50,
+                    step=1,
+                    key=f"sma_slow_{estrategia}",
+                )
+                strategy_params[estrategia] = {"fast": float(fast), "slow": float(slow)}
+            elif estrategia == "RSI":
+                period = st.number_input(
+                    "Periodo RSI",
+                    min_value=5,
+                    max_value=50,
+                    value=14,
+                    step=1,
+                    key=f"rsi_period_{estrategia}",
+                )
+                strategy_params[estrategia] = {"period": float(period)}
+            elif estrategia == "Bollinger Bands":
+                period = st.number_input(
+                    "Periodo",
+                    min_value=5,
+                    max_value=60,
+                    value=20,
+                    step=1,
+                    key=f"bb_period_{estrategia}",
+                )
+                std_mult = st.number_input(
+                    "Desviaciones estándar",
+                    min_value=1.0,
+                    max_value=3.5,
+                    value=2.0,
+                    step=0.1,
+                    key=f"bb_std_{estrategia}",
+                )
+                strategy_params[estrategia] = {
+                    "period": float(period),
+                    "std_mult": float(std_mult),
+                }
 
     file_path = Path(f"data/history/{symbol}_{interval}.csv")
+    df = None
     if not file_path.exists():
         st.warning(
             "No hay datos descargados para este símbolo e intervalo. Descárgalos primero en la pestaña 📥 Datos."
         )
     else:
         df = pd.read_csv(file_path)
-        if st.button("▶️ Ejecutar Backtest"):
-            result = run_backtest(df, strategy, params)
-            st.success("✅ Backtest completado.")
+        numeric_columns = [col for col in ["open", "high", "low", "close", "volume"] if col in df.columns]
+        for col in numeric_columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        df.dropna(subset=["close"], inplace=True)
 
-            st.subheader("📈 Métricas")
-            st.json(result["metrics"])
+    if "backtest_result" not in st.session_state:
+        st.session_state["backtest_result"] = None
 
-            fig = go.Figure(
-                data=[
-                    go.Candlestick(
-                        x=df["open_time"],
-                        open=df["open"],
-                        high=df["high"],
-                        low=df["low"],
-                        close=df["close"],
+    if st.button("▶️ Ejecutar Backtest"):
+        if df is None or df.empty:
+            st.warning("Debes contar con datos históricos válidos para ejecutar el backtest.")
+        elif not estrategias_seleccionadas:
+            st.warning("Selecciona al menos una estrategia para continuar.")
+        else:
+            try:
+                with st.spinner("Ejecutando backtest..."):
+                    result = run_backtest(
+                        df,
+                        estrategias_seleccionadas,
+                        strategy_params,
+                        capital_inicial=capital_inicial,
+                        riesgo_por_trade=riesgo_por_trade,
+                        logica=logica_combinacion,
                     )
-                ]
+                st.session_state["backtest_result"] = {
+                    "result": result,
+                    "symbol": symbol,
+                    "interval": interval,
+                    "strategies": estrategias_seleccionadas,
+                    "capital_inicial": capital_inicial,
+                    "riesgo": riesgo_por_trade,
+                    "logica": logica_combinacion,
+                }
+                st.success("✅ Backtest completado.")
+            except ValueError as exc:
+                st.error(f"❌ {exc}")
+
+    stored = st.session_state.get("backtest_result")
+    if stored:
+        result = stored["result"]
+        trades_df = result.trades.copy()
+        equity_curve = result.equity_curve
+
+        st.subheader("📈 Métricas avanzadas")
+        metrics_df = pd.DataFrame([result.metrics]).T.rename(columns={0: "Valor"})
+        st.dataframe(metrics_df, use_container_width=True)
+
+        chart_df = result.data.copy()
+        fig = go.Figure(
+            data=[
+                go.Candlestick(
+                    x=chart_df["open_time"],
+                    open=chart_df["open"],
+                    high=chart_df["high"],
+                    low=chart_df["low"],
+                    close=chart_df["close"],
+                    name="Velas",
+                )
+            ]
+        )
+
+        overlay_cols = [
+            col
+            for col in chart_df.columns
+            if col.startswith("sma_fast_")
+            or col.startswith("sma_slow_")
+            or col.startswith("bb_ma_")
+            or col.startswith("bb_upper_")
+            or col.startswith("bb_lower_")
+        ]
+        for col in overlay_cols:
+            fig.add_trace(
+                go.Scatter(
+                    x=chart_df["open_time"],
+                    y=chart_df[col],
+                    name=col.replace("_", " "),
+                    line=dict(width=1),
+                    opacity=0.6,
+                )
             )
-            st.plotly_chart(fig, use_container_width=True)
 
-            st.subheader("📊 Curva de Equity")
-            st.line_chart(result["equity_curve"]["equity"])
+        if not trades_df.empty:
+            trades_df["resultado"] = np.where(trades_df["pnl"] > 0, "Ganadora", "Perdedora")
 
-            st.subheader("🧾 Operaciones")
-            st.dataframe(result["trades"])
+            fig.add_trace(
+                go.Scatter(
+                    x=trades_df.loc[trades_df["resultado"] == "Ganadora", "entrada"],
+                    y=trades_df.loc[trades_df["resultado"] == "Ganadora", "precio_entrada"],
+                    mode="markers",
+                    marker=dict(symbol="triangle-up", size=12, color="#2ecc71"),
+                    name="Entrada ganadora",
+                    hovertemplate=
+                    "Entrada: %{x}<br>Precio: %{y}<br>PNL %: %{customdata:.2%}<extra></extra>",
+                    customdata=trades_df.loc[trades_df["resultado"] == "Ganadora", "pnl"],
+                )
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=trades_df.loc[trades_df["resultado"] == "Perdedora", "entrada"],
+                    y=trades_df.loc[trades_df["resultado"] == "Perdedora", "precio_entrada"],
+                    mode="markers",
+                    marker=dict(symbol="triangle-up", size=12, color="#e74c3c"),
+                    name="Entrada perdedora",
+                    hovertemplate=
+                    "Entrada: %{x}<br>Precio: %{y}<br>PNL %: %{customdata:.2%}<extra></extra>",
+                    customdata=trades_df.loc[trades_df["resultado"] == "Perdedora", "pnl"],
+                )
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=trades_df["salida"],
+                    y=trades_df["precio_salida"],
+                    mode="markers",
+                    marker=dict(symbol="triangle-down", size=12, color="#3498db"),
+                    name="Salida",
+                    hovertemplate=
+                    "Salida: %{x}<br>Precio: %{y}<br>PNL %: %{customdata:.2%}<extra></extra>",
+                    customdata=trades_df["pnl"],
+                )
+            )
+
+        fig.update_layout(title="📉 Señales sobre el precio", legend=dict(orientation="h", yanchor="bottom", y=1.02))
+        st.plotly_chart(fig, use_container_width=True)
+
+        st.subheader("📈 Curva de Patrimonio")
+        st.line_chart(equity_curve, height=300)
+
+        if not trades_df.empty:
+            st.subheader("📊 Distribución de Retornos")
+            hist_df = trades_df.copy()
+            hist_df["resultado"] = np.where(hist_df["pnl"] > 0, "Ganadora", "Perdedora")
+            fig_hist = px.histogram(
+                hist_df,
+                x="pnl",
+                nbins=20,
+                color="resultado",
+                color_discrete_map={"Ganadora": "#2ecc71", "Perdedora": "#e74c3c"},
+                labels={"pnl": "Retorno por operación"},
+            )
+            fig_hist.update_layout(bargap=0.15)
+            st.plotly_chart(fig_hist, use_container_width=True)
+
+        st.subheader("🧾 Operaciones")
+        trades_display = trades_df.copy()
+        if not trades_display.empty:
+            trades_display["pnl_%"] = (trades_display["pnl"] * 100).round(4)
+            trades_display["entrada"] = trades_display["entrada"].dt.strftime("%Y-%m-%d %H:%M")
+            trades_display["salida"] = trades_display["salida"].dt.strftime("%Y-%m-%d %H:%M")
+            st.dataframe(trades_display, use_container_width=True)
+        else:
+            st.info("No se generaron operaciones con la configuración actual.")
+
+        export_col1, export_col2 = st.columns([0.2, 0.8])
+        with export_col1:
+            if st.button("💾 Exportar resultados", key="export_backtest"):
+                if trades_df.empty:
+                    st.warning("No hay operaciones para exportar en CSV.")
+                else:
+                    output_dir = Path("data/backtests")
+                    output_dir.mkdir(parents=True, exist_ok=True)
+                    strategy_label = "+".join(stored["strategies"]).replace(" ", "")
+                    file_name = f"{stored['symbol']}_{strategy_label}_{stored['interval']}.csv"
+                    trades_df.to_csv(output_dir / file_name, index=False)
+                    st.success("Resultados exportados correctamente.")
 
 else:
     st.write("### ⚙️ Configuración y ayuda")
