@@ -44,6 +44,7 @@ python -m core.engine --config config.yaml \
 
 - El feed `BinancePublicDataFeed` permite descargar velas OHLCV directamente desde el endpoint público de Binance **sin API key**.
 - Respeta los límites públicos de Binance (máximo de 1200 requests por minuto); el cliente incluye pausas y reintentos exponenciales automáticos.
+- La interfaz Streamlit incluida en `streamlit_app.py` ahora muestra una barra de progreso visual y un registro en tiempo real con el avance de cada bloque descargado desde Binance.
 
 ### Script de utilidad
 
