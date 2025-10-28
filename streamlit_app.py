@@ -1,6 +1,7 @@
 """Interfaz Streamlit para descargar datos históricos y ejecutar backtests visuales."""
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Iterable, List
@@ -579,9 +580,43 @@ elif tab == "🔁 Backtesting":
                     output_dir = Path("data/backtests")
                     output_dir.mkdir(parents=True, exist_ok=True)
                     strategy_label = "+".join(stored["strategies"]).replace(" ", "")
-                    file_name = f"{stored['symbol']}_{strategy_label}_{stored['interval']}.csv"
-                    trades_df.to_csv(output_dir / file_name, index=False)
-                    st.success("Resultados exportados correctamente.")
+                    base_name = f"{stored['symbol']}_{strategy_label}_{stored['interval']}"
+
+                    trades_path = output_dir / f"{base_name}_trades.csv"
+                    trades_df.to_csv(trades_path, index=False)
+
+                    equity_curve = result.equity_curve
+                    drawdown_curve = result.drawdown.reindex(
+                        equity_curve.index, fill_value=0.0
+                    )
+                    equity_export = equity_curve.reset_index()
+                    equity_export.columns = ["timestamp", "equity"]
+                    equity_export["drawdown"] = drawdown_curve.reset_index(drop=True)
+                    equity_path = output_dir / f"{base_name}_equity_curve.csv"
+                    equity_export.to_csv(equity_path, index=False)
+
+                    metrics_payload: Dict[str, float | int | None] = {}
+                    for key, value in result.metrics.items():
+                        converted = value
+                        if isinstance(converted, (np.floating, np.integer)):
+                            converted = float(converted)
+                        if isinstance(converted, (float, int)):
+                            if isinstance(converted, float) and not np.isfinite(converted):
+                                metrics_payload[key] = None
+                            else:
+                                metrics_payload[key] = converted
+                        else:
+                            metrics_payload[key] = converted
+
+                    metrics_path = output_dir / f"{base_name}_metrics.json"
+                    metrics_path.write_text(
+                        json.dumps(metrics_payload, indent=2, ensure_ascii=False),
+                        encoding="utf-8",
+                    )
+
+                    st.success(
+                        "Resultados exportados correctamente (operaciones, equity y métricas)."
+                    )
 
 else:
     st.write("### ⚙️ Configuración y ayuda")
