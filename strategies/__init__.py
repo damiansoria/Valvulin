@@ -7,6 +7,7 @@ from .candlestick_patterns import CandlestickPatternStrategy
 from .ema_macd import EMAMACDStrategy
 from .inside_bar import InsideBarStrategy
 from .rsi_divergence import RSIDivergenceStrategy
+from .momentum_burst import MomentumBurstStrategy
 
 __all__ = [
     "BaseStrategy",
@@ -16,4 +17,5 @@ __all__ = [
     "EMAMACDStrategy",
     "InsideBarStrategy",
     "RSIDivergenceStrategy",
+    "MomentumBurstStrategy",
 ]
