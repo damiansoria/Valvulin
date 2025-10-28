@@ -266,7 +266,8 @@ def run_backtest(
 
         if signal_value == 0:
             return
-        risk_amount = capital * riesgo_fraccion
+        current_capital = max(capital, 0.0)
+        risk_amount = current_capital * riesgo_fraccion
         if risk_amount <= 0 or price_value <= 0:
             return
         stop_price_value = _compute_stop_price(price_value, signal_value)
