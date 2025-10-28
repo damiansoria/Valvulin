@@ -382,6 +382,21 @@ def run_backtest(
     trades_df = pd.DataFrame(trades)
 
     if not trades_df.empty:
+        capital = float(capital_inicial)
+        capital_series: List[float] = []
+        capital_inicial_series: List[float] = []
+        capital_final_series: List[float] = []
+
+        for pnl in trades_df["pnl_usd"].astype(float):
+            capital_inicial_series.append(capital)
+            capital += pnl
+            capital_final_series.append(capital)
+            capital_series.append(capital)
+
+        trades_df["capital_inicial"] = capital_inicial_series
+        trades_df["capital_final"] = capital_final_series
+        equity_values = [float(capital_inicial), *capital_series]
+
         trades_df["entrada"] = pd.to_datetime(trades_df["entrada"], errors="coerce")
         trades_df["salida"] = pd.to_datetime(trades_df["salida"], errors="coerce")
 
