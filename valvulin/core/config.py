@@ -3,10 +3,13 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from datetime import datetime, time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 import yaml
+
+from execution.backtester import BacktestSettings
 
 
 CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
@@ -47,7 +50,7 @@ class AppConfig:
     api: APISettings
     risk: RiskSettings
     data: DataSettings
-    backtester: Dict[str, Any]
+    backtester: BacktestSettings
 
 
 class ConfigError(RuntimeError):
@@ -73,7 +76,7 @@ class ConfigLoader:
         )
         risk_cfg = config.get("risk", {})
         data_cfg = config.get("data", {})
-        backtester_cfg = config.get("backtester", {})
+        backtester_cfg = self._normalise_backtester(config.get("backtester", {}))
 
         risk_settings = RiskSettings(
             max_position_size_pct=float(risk_cfg.get("max_position_size_pct", 2.0)),
@@ -89,7 +92,7 @@ class ConfigLoader:
             api=api_settings,
             risk=risk_settings,
             data=data_settings,
-            backtester=backtester_cfg,
+            backtester=BacktestSettings(**backtester_cfg),
         )
 
     def _load_yaml(self) -> Dict[str, Any]:
@@ -111,5 +114,46 @@ class ConfigLoader:
         env.update({key: value for key, value in os.environ.items() if key.startswith("BINANCE_") or key.endswith("DATABASE_URL")})
         return env
 
+    def _normalise_backtester(self, config: Dict[str, Any]) -> Dict[str, Any]:
+        cfg = dict(config)
+        cfg.pop("engine", None)
+        trading_hours = cfg.pop("trading_hours", None)
+        if trading_hours:
+            start = trading_hours.get("start")
+            end = trading_hours.get("end")
+            if start:
+                cfg["session_start"] = self._parse_time(start)
+            if end:
+                cfg["session_end"] = self._parse_time(end)
+            cfg.setdefault("use_session_limits", True)
+        else:
+            if "session_start" in cfg:
+                cfg["session_start"] = self._parse_time(cfg["session_start"])
+            if "session_end" in cfg:
+                cfg["session_end"] = self._parse_time(cfg["session_end"])
 
-__all__ = ["AppConfig", "ConfigLoader", "ConfigError", "APISettings", "RiskSettings", "DataSettings"]
+        if "export_directory" in cfg and cfg["export_directory"]:
+            cfg["export_directory"] = Path(cfg["export_directory"]).expanduser()
+
+        return cfg
+
+    @staticmethod
+    def _parse_time(value: Any) -> Optional[time]:
+        if value in (None, ""):
+            return None
+        if isinstance(value, datetime):
+            return value.time()
+        if isinstance(value, str):
+            return datetime.strptime(value, "%H:%M").time()
+        raise ValueError(f"Cannot parse time value: {value!r}")
+
+
+__all__ = [
+    "AppConfig",
+    "ConfigLoader",
+    "ConfigError",
+    "APISettings",
+    "RiskSettings",
+    "DataSettings",
+    "BacktestSettings",
+]
