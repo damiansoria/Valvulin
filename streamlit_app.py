@@ -14,6 +14,7 @@ import streamlit as st
 import yaml
 
 from analytics.backtest_visual import run_backtest
+from analytics.csv_normalization import normalize_trade_dataframe
 from analytics.metrics import compute_backtest_summary_metrics, prepare_drawdown_columns
 from analytics.plot_utils import (
     plot_equity_curve,
@@ -694,26 +695,12 @@ elif tab == "📊 Analytics":
     if trades_df is None:
         st.info("Carga un CSV de operaciones para visualizar los resultados del backtest.")
     else:
-        translation_map = {
-            "precio_entrada": "entry_price",
-            "precio_salida": "exit_price",
-            "lado": "side",
-            "símbolo": "symbol",
-            "simbolo": "symbol",
-            "par": "symbol",
-            "fecha_hora": "timestamp",
-            "hora": "timestamp",
-        }
-
         trades_df = trades_df.copy()
-        normalized_columns = [col.strip().lower() for col in trades_df.columns]
-        trades_df.columns = normalized_columns
-        translation_applied = any(col in translation_map for col in normalized_columns)
-        trades_df.rename(columns=translation_map, inplace=True)
+        trades_df, translation_applied = normalize_trade_dataframe(trades_df)
 
         if translation_applied:
-            st.sidebar.success(
-                "✔ CSV detectado correctamente (idioma: español traducido automáticamente)"
+            st.sidebar.info(
+                "✅ CSV detectado correctamente. Columnas estandarizadas para análisis."
             )
 
         required_columns = {
