@@ -14,6 +14,13 @@ import streamlit as st
 import yaml
 
 from analytics.backtest_visual import run_backtest
+from analytics.metrics import compute_backtest_summary_metrics, prepare_drawdown_columns
+from analytics.plot_utils import (
+    plot_equity_curve,
+    plot_drawdown_curve,
+    plot_expectancy_bar,
+    plot_r_multiple_distribution,
+)
 from valvulin.data.binance_public import BinancePublicDataFeed
 
 
@@ -27,12 +34,13 @@ if "logs" not in st.session_state:
 if "pending_feeds" not in st.session_state:
     st.session_state["pending_feeds"] = {}
 
-st.title("📈 Valvulin - Bot de Trading y Backtesting")
-
 # Navegación lateral
-tab = st.sidebar.radio("📊 Sección", ["📥 Datos", "🔁 Backtesting", "⚙️ Configuración"])
+tab = st.sidebar.radio(
+    "📊 Sección", ["📥 Datos", "🔁 Backtesting", "📊 Analytics", "⚙️ Configuración"]
+)
 
 if tab == "📥 Datos":
+    st.title("📈 Valvulin - Bot de Trading y Backtesting")
     st.sidebar.header("⚙️ Configuración de datos")
     user_symbol = st.sidebar.text_input("Símbolo principal", value="BTCUSDT").upper().strip()
     predefined_symbols: List[str] = [
@@ -334,7 +342,7 @@ if tab == "📥 Datos":
             st.error(error)
 
 elif tab == "🔁 Backtesting":
-    st.title("🔁 Backtesting Visual")
+    st.title("🔁 Valvulin - Backtesting")
 
     symbol = st.selectbox("Símbolo", ["BTCUSDT", "ETHUSDT"])
     interval = st.selectbox("Intervalo", ["1h", "4h", "1d"])
@@ -628,7 +636,204 @@ elif tab == "🔁 Backtesting":
                         "Resultados exportados correctamente (operaciones, equity y métricas)."
                     )
 
-else:
+elif tab == "📊 Analytics":
+    st.title("📊 Valvulin Backtest Analytics")
+
+    st.sidebar.header("📁 Resultados del Backtest")
+    trades_file = st.sidebar.file_uploader(
+        "Carga el CSV de trades", type=["csv"], key="analytics_trades_uploader"
+    )
+    trades_path_input = st.sidebar.text_input(
+        "Ruta alternativa del CSV de trades", value="", key="analytics_trades_path"
+    )
+
+    summary_file = st.sidebar.file_uploader(
+        "Carga el CSV de métricas (opcional)",
+        type=["csv"],
+        key="analytics_summary_uploader",
+    )
+    summary_path_input = st.sidebar.text_input(
+        "Ruta alternativa del CSV de métricas (opcional)",
+        value="",
+        key="analytics_summary_path",
+    )
+
+    trades_df = None
+    summary_df = None
+
+    if trades_file is not None:
+        try:
+            trades_df = pd.read_csv(trades_file)
+        except Exception as exc:  # pragma: no cover - defensive UI feedback
+            st.sidebar.error(f"No se pudo leer el CSV de trades: {exc}")
+    elif trades_path_input:
+        trades_path = Path(trades_path_input).expanduser()
+        if trades_path.exists():
+            try:
+                trades_df = pd.read_csv(trades_path)
+            except Exception as exc:  # pragma: no cover - defensive UI feedback
+                st.sidebar.error(f"No se pudo leer el CSV de trades: {exc}")
+        else:
+            st.sidebar.warning("La ruta de trades especificada no existe.")
+
+    if summary_file is not None:
+        try:
+            summary_df = pd.read_csv(summary_file)
+        except Exception as exc:  # pragma: no cover - defensive UI feedback
+            st.sidebar.error(f"No se pudo leer el CSV de métricas: {exc}")
+    elif summary_path_input:
+        summary_path = Path(summary_path_input).expanduser()
+        if summary_path.exists():
+            try:
+                summary_df = pd.read_csv(summary_path)
+            except Exception as exc:  # pragma: no cover - defensive UI feedback
+                st.sidebar.error(f"No se pudo leer el CSV de métricas: {exc}")
+        else:
+            st.sidebar.warning("La ruta de métricas especificada no existe.")
+
+    if trades_df is None:
+        st.info("Carga un CSV de operaciones para visualizar los resultados del backtest.")
+    else:
+        required_columns = {
+            "timestamp",
+            "symbol",
+            "side",
+            "entry_price",
+            "exit_price",
+            "r_multiple",
+            "capital_final",
+        }
+        missing_columns = required_columns.difference(trades_df.columns)
+        if missing_columns:
+            st.error(
+                "El CSV de trades debe contener las columnas requeridas: "
+                + ", ".join(sorted(missing_columns))
+            )
+        else:
+            trades_df = trades_df.copy()
+            trades_df["timestamp"] = pd.to_datetime(
+                trades_df["timestamp"], errors="coerce"
+            )
+            for numeric_column in [
+                "entry_price",
+                "exit_price",
+                "r_multiple",
+                "capital_final",
+            ]:
+                trades_df[numeric_column] = pd.to_numeric(
+                    trades_df[numeric_column], errors="coerce"
+                )
+            trades_df.sort_values(by="timestamp", inplace=True)
+            trades_df.dropna(subset=["capital_final", "r_multiple"], inplace=True)
+
+            st.sidebar.subheader("🔍 Filtros")
+            strategy_col = "strategy" if "strategy" in trades_df.columns else None
+            if strategy_col:
+                strategy_options = ["Todas"] + sorted(
+                    trades_df[strategy_col].dropna().astype(str).unique().tolist()
+                )
+            else:
+                strategy_options = ["Todas"]
+            selected_strategy = st.sidebar.selectbox(
+                "Selecciona estrategia", strategy_options
+            )
+
+            symbol_options = ["Todos"] + sorted(
+                trades_df["symbol"].dropna().astype(str).unique().tolist()
+            )
+            selected_symbol = st.sidebar.selectbox("Selecciona símbolo", symbol_options)
+
+            date_range_value = None
+            if trades_df["timestamp"].notna().any():
+                valid_timestamps = trades_df["timestamp"].dropna()
+                min_date = valid_timestamps.min().date()
+                max_date = valid_timestamps.max().date()
+                date_range_value = st.sidebar.date_input(
+                    "Rango de fechas",
+                    value=(min_date, max_date),
+                )
+
+            filtered_df = trades_df
+            if strategy_col and selected_strategy != "Todas":
+                filtered_df = filtered_df[
+                    filtered_df[strategy_col].astype(str) == selected_strategy
+                ]
+            if selected_symbol != "Todos":
+                filtered_df = filtered_df[filtered_df["symbol"] == selected_symbol]
+
+            if date_range_value:
+                if isinstance(date_range_value, tuple):
+                    start_date, end_date = date_range_value
+                elif isinstance(date_range_value, list) and len(date_range_value) == 2:
+                    start_date, end_date = date_range_value
+                else:
+                    start_date = end_date = date_range_value
+
+                if start_date and end_date:
+                    if start_date > end_date:
+                        start_date, end_date = end_date, start_date
+                    start_ts = pd.Timestamp(start_date)
+                    end_ts = pd.Timestamp(end_date) + pd.Timedelta(days=1) - pd.Timedelta(
+                        microseconds=1
+                    )
+                    filtered_df = filtered_df[
+                        filtered_df["timestamp"].between(start_ts, end_ts)
+                    ]
+
+            if filtered_df.empty:
+                st.warning("No hay operaciones para los filtros seleccionados.")
+            else:
+                enriched_df = prepare_drawdown_columns(filtered_df)
+                summary_metrics = compute_backtest_summary_metrics(
+                    filtered_df, summary_df
+                )
+
+                st.subheader("🧾 Summary Metrics")
+                metric_labels = [
+                    "Winrate %",
+                    "Net Profit %",
+                    "Expectancy (R)",
+                    "Average Win (R)",
+                    "Average Loss (R)",
+                    "RR Effective",
+                    "Breakeven Winrate %",
+                    "Max Drawdown %",
+                    "Profit Factor",
+                ]
+                metric_columns = st.columns(3)
+                for idx, label in enumerate(metric_labels):
+                    column = metric_columns[idx % 3]
+                    value = summary_metrics.get(label, 0.0)
+                    if label.endswith("%"):
+                        column.metric(label, f"{value:.2f}%")
+                    else:
+                        column.metric(label, f"{value:.2f}")
+
+                st.subheader("📈 Equity Curve")
+                equity_fig = plot_equity_curve(enriched_df, drawdown=enriched_df["drawdown"])
+                st.pyplot(equity_fig, use_container_width=True)
+
+                st.subheader("📉 Drawdown Curve")
+                drawdown_fig = plot_drawdown_curve(enriched_df)
+                st.pyplot(drawdown_fig, use_container_width=True)
+
+                st.subheader("📊 R-Multiple Distribution")
+                r_multiple_fig = plot_r_multiple_distribution(filtered_df)
+                st.pyplot(r_multiple_fig, use_container_width=True)
+
+                st.subheader("📈 Expectancy")
+                expectancy_fig = plot_expectancy_bar(summary_metrics.get("Expectancy (R)", 0.0))
+                st.pyplot(expectancy_fig, use_container_width=False)
+
+                with st.expander("Ver operaciones filtradas"):
+                    preview_df = filtered_df.copy()
+                    preview_df["timestamp"] = preview_df["timestamp"].dt.strftime(
+                        "%Y-%m-%d %H:%M:%S"
+                    )
+                    st.dataframe(preview_df, use_container_width=True)
+
+elif tab == "⚙️ Configuración":
+    st.title("⚙️ Configuración y ayuda")
     st.write("### ⚙️ Configuración y ayuda")
     st.write(
         "Utiliza esta sección para gestionar archivos de configuración avanzados, documentar tus estrategias o añadir notas de operación."

@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, Sequence
+from typing import Iterable, Mapping, Sequence
 
 import numpy as np
+import pandas as pd
 
 from risk.position_sizing import PositionSizingResult
 
@@ -92,10 +93,96 @@ def trade_distribution_metrics(r_values: Sequence[float]) -> dict[str, float]:
     }
 
 
+def prepare_drawdown_columns(df_trades: pd.DataFrame) -> pd.DataFrame:
+    """Return a copy of ``df_trades`` enriched with peak and drawdown columns."""
+
+    if "capital_final" not in df_trades.columns:
+        raise ValueError("'capital_final' column is required to compute drawdown.")
+
+    enriched = df_trades.copy()
+    enriched["peak"] = enriched["capital_final"].cummax()
+    with np.errstate(divide="ignore", invalid="ignore"):
+        enriched["drawdown"] = (
+            (enriched["capital_final"] - enriched["peak"]) / enriched["peak"]
+        ) * 100
+    enriched["drawdown"] = enriched["drawdown"].fillna(0.0)
+    return enriched
+
+
+def compute_backtest_summary_metrics(
+    trades_df: pd.DataFrame, summary_df: pd.DataFrame | Mapping[str, float] | None = None
+) -> dict[str, float]:
+    """Aggregate the core metrics required for the analytics dashboard."""
+
+    if trades_df.empty:
+        return {
+            "Winrate %": 0.0,
+            "Net Profit %": 0.0,
+            "Expectancy (R)": 0.0,
+            "Average Win (R)": 0.0,
+            "Average Loss (R)": 0.0,
+            "RR Effective": 0.0,
+            "Breakeven Winrate %": 0.0,
+            "Max Drawdown %": 0.0,
+            "Profit Factor": 0.0,
+        }
+
+    metrics = trade_distribution_metrics(trades_df["r_multiple"].fillna(0.0))
+
+    winrate_pct = metrics["Winrate"] * 100
+    expectancy = metrics["Expectancy (R)"]
+    avg_win = metrics["Average Win (R)"]
+    avg_loss = metrics["Average Loss (R)"]
+    rr_effective = metrics["RR Effective"] if np.isfinite(metrics["RR Effective"]) else 0.0
+    breakeven = metrics["Breakeven Winrate %"]
+
+    capital_series = trades_df["capital_final"].astype(float)
+    initial_capital = capital_series.iloc[0]
+    final_capital = capital_series.iloc[-1]
+    net_profit_pct = ((final_capital / initial_capital) - 1.0) * 100 if initial_capital else 0.0
+
+    enriched = prepare_drawdown_columns(trades_df)
+    max_drawdown_pct = enriched["drawdown"].min()
+
+    positive_r = trades_df.loc[trades_df["r_multiple"] > 0, "r_multiple"]
+    negative_r = trades_df.loc[trades_df["r_multiple"] < 0, "r_multiple"]
+    total_wins = float(positive_r.sum())
+    total_losses = float(negative_r.sum())
+    profit_factor = abs(total_wins) / abs(total_losses) if total_losses != 0 else float("inf")
+    profit_factor = profit_factor if np.isfinite(profit_factor) else float("inf")
+
+    summary_metrics = {
+        "Winrate %": winrate_pct,
+        "Net Profit %": net_profit_pct,
+        "Expectancy (R)": expectancy,
+        "Average Win (R)": avg_win,
+        "Average Loss (R)": avg_loss,
+        "RR Effective": rr_effective,
+        "Breakeven Winrate %": breakeven,
+        "Max Drawdown %": abs(max_drawdown_pct),
+        "Profit Factor": profit_factor,
+    }
+
+    if summary_df is not None:
+        if isinstance(summary_df, pd.DataFrame):
+            row = summary_df.iloc[0]
+            for key in summary_metrics.keys():
+                if key in row:
+                    summary_metrics[key] = float(row[key])
+        else:
+            for key in summary_metrics.keys():
+                if key in summary_df:
+                    summary_metrics[key] = float(summary_df[key])
+
+    return summary_metrics
+
+
 __all__ = [
     "RiskMetrics",
     "historical_var",
     "capital_at_risk",
     "build_risk_metrics",
     "trade_distribution_metrics",
+    "prepare_drawdown_columns",
+    "compute_backtest_summary_metrics",
 ]
