@@ -694,6 +694,28 @@ elif tab == "📊 Analytics":
     if trades_df is None:
         st.info("Carga un CSV de operaciones para visualizar los resultados del backtest.")
     else:
+        translation_map = {
+            "precio_entrada": "entry_price",
+            "precio_salida": "exit_price",
+            "lado": "side",
+            "símbolo": "symbol",
+            "simbolo": "symbol",
+            "par": "symbol",
+            "fecha_hora": "timestamp",
+            "hora": "timestamp",
+        }
+
+        trades_df = trades_df.copy()
+        normalized_columns = [col.strip().lower() for col in trades_df.columns]
+        trades_df.columns = normalized_columns
+        translation_applied = any(col in translation_map for col in normalized_columns)
+        trades_df.rename(columns=translation_map, inplace=True)
+
+        if translation_applied:
+            st.sidebar.success(
+                "✔ CSV detectado correctamente (idioma: español traducido automáticamente)"
+            )
+
         required_columns = {
             "timestamp",
             "symbol",
@@ -710,7 +732,6 @@ elif tab == "📊 Analytics":
                 + ", ".join(sorted(missing_columns))
             )
         else:
-            trades_df = trades_df.copy()
             trades_df["timestamp"] = pd.to_datetime(
                 trades_df["timestamp"], errors="coerce"
             )
