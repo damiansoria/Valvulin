@@ -12,18 +12,24 @@ tests and analytics notebooks.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from datetime import datetime, time
+from datetime import datetime
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
+
+from analytics.metrics import trade_distribution_metrics
 
 from .types import OrderStatus, TradeSignal
 
 if TYPE_CHECKING:
     from analytics.trade_logger import TradeLogger
+
+
+DEFAULT_INITIAL_EQUITY = 1_000.0
+DEFAULT_ATR_PERIOD = 14
 
 
 def _validate_percentage(name: str, value: float) -> float:
@@ -36,56 +42,18 @@ def _validate_percentage(name: str, value: float) -> float:
 class BacktestSettings:
     """Container for the configurable aspects of a backtest run."""
 
-    initial_equity: float = 1_000.0
     risk_per_trade_pct: float = 1.0
-    commission_pct: float = 0.0
-    maker_commission_pct: Optional[float] = None
-    taker_commission_pct: Optional[float] = None
-    slippage_pct: float = 0.0
-    use_trailing_stop: bool = False
-    trailing_activation_r: float = 1.0
-    trailing_method: str = "atr"
-    trailing_atr_multiplier: float = 1.0
-    trailing_percent: float = 0.5
-    default_stop_atr_multiplier: float = 1.0
-    atr_period: int = 14
-    max_daily_loss_pct: float = 10.0
-    max_consecutive_losses: int = 10
-    use_session_limits: bool = False
-    session_start: Optional[time] = None
-    session_end: Optional[time] = None
-    volatility_atr_threshold: Optional[float] = None
-    min_volume_ratio: float = 0.5
-    export_directory: Optional[Path] = None
-    strategies: Optional[Dict[str, bool]] = None
+    rr_ratio: float = 2.0
+    sl_ratio: float = 1.0
+    commission_pct: float = 0.1
 
     def __post_init__(self) -> None:
-        if self.initial_equity <= 0:
-            raise ValueError("initial_equity must be positive")
         _validate_percentage("risk_per_trade_pct", self.risk_per_trade_pct)
-        if self.maker_commission_pct is not None:
-            _validate_percentage("maker_commission_pct", self.maker_commission_pct)
-        if self.taker_commission_pct is not None:
-            _validate_percentage("taker_commission_pct", self.taker_commission_pct)
+        if self.rr_ratio <= 0:
+            raise ValueError("rr_ratio must be positive")
+        if self.sl_ratio <= 0:
+            raise ValueError("sl_ratio must be positive")
         _validate_percentage("commission_pct", self.commission_pct)
-        _validate_percentage("slippage_pct", self.slippage_pct)
-        _validate_percentage("max_daily_loss_pct", self.max_daily_loss_pct)
-        if self.max_consecutive_losses <= 0:
-            raise ValueError("max_consecutive_losses must be positive")
-        if self.trailing_method not in {"atr", "percent"}:
-            raise ValueError("trailing_method must be 'atr' or 'percent'")
-        if self.trailing_activation_r < 0:
-            raise ValueError("trailing_activation_r must be non-negative")
-        if self.trailing_method == "percent" and self.trailing_percent <= 0:
-            raise ValueError("trailing_percent must be positive when using percentage trailing")
-        if self.trailing_method == "atr" and self.trailing_atr_multiplier <= 0:
-            raise ValueError("trailing_atr_multiplier must be positive when using ATR trailing")
-        if self.default_stop_atr_multiplier <= 0:
-            raise ValueError("default_stop_atr_multiplier must be positive")
-        if self.atr_period <= 1:
-            raise ValueError("atr_period must be greater than 1")
-        if self.min_volume_ratio < 0:
-            raise ValueError("min_volume_ratio must be non-negative")
 
 
 @dataclass(slots=True)
@@ -152,7 +120,7 @@ class BacktestResult:
     max_consecutive_losses: int
     trade_log_path: Optional[Path] = None
     equity_curve_path: Optional[Path] = None
-    metadata: Dict[str, float] = field(default_factory=dict)
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
     def trades_frame(self) -> pd.DataFrame:
         """Return the list of trades as a :class:`pandas.DataFrame`."""
@@ -230,49 +198,30 @@ class Backtester:
         settings: Optional[BacktestSettings] = None,
         initial_equity: Optional[float] = None,
         risk_per_trade_pct: Optional[float] = None,
+        export_directory: Optional[Path] = None,
     ) -> BacktestResult:
         """Simulate the provided trade ``signals`` over the stored OHLCV data."""
 
-        resolved_settings = self._resolve_settings(
-            settings, initial_equity=initial_equity, risk=risk_per_trade_pct
-        )
+        resolved_settings = self._resolve_settings(settings, risk=risk_per_trade_pct)
+        starting_equity = float(initial_equity) if initial_equity is not None else DEFAULT_INITIAL_EQUITY
 
         trades: List[TradeRecord] = []
         equity_values: List[float] = []
         equity_index: List[datetime] = []
         equity_by_trade: List[Tuple[datetime, float]] = []
 
-        equity = float(resolved_settings.initial_equity)
-        consecutive_losses = 0
+        equity = starting_equity
         worst_consecutive_losses = 0
-        daily_stats: Dict[pd.Timestamp, Dict[str, float]] = {}
+        current_losses = 0
 
         if not self.ohlcv.empty:
             equity_index.append(self.ohlcv.index[0].to_pydatetime())
         equity_values.append(equity)
 
-        atr_series = self._compute_atr(resolved_settings.atr_period)
-
+        atr_series = self._compute_atr(DEFAULT_ATR_PERIOD)
         sorted_signals = sorted(signals, key=lambda s: s.timestamp)
 
         for signal in sorted_signals:
-            if not self._is_signal_enabled(signal, resolved_settings):
-                continue
-
-            if resolved_settings.use_session_limits and not self._within_session(
-                signal.timestamp, resolved_settings
-            ):
-                continue
-
-            signal_day = pd.Timestamp(signal.timestamp).normalize()
-            stats = daily_stats.setdefault(
-                signal_day, {"start_equity": equity, "pnl": 0.0, "stop": False}
-            )
-            if stats["stop"]:
-                continue
-            if consecutive_losses >= resolved_settings.max_consecutive_losses:
-                break
-
             record = self._simulate_signal(
                 signal,
                 equity,
@@ -288,18 +237,11 @@ class Backtester:
             equity_index.append(record.exit_time)
             equity_by_trade.append((record.exit_time, equity))
 
-            pnl = record.pnl
-            if pnl < 0:
-                consecutive_losses += 1
+            if record.pnl < 0:
+                current_losses += 1
             else:
-                consecutive_losses = 0
-            worst_consecutive_losses = max(worst_consecutive_losses, consecutive_losses)
-
-            stats["pnl"] += pnl
-            if stats["pnl"] <= -resolved_settings.max_daily_loss_pct / 100 * stats[
-                "start_equity"
-            ]:
-                stats["stop"] = True
+                current_losses = 0
+            worst_consecutive_losses = max(worst_consecutive_losses, current_losses)
 
         equity_curve = self._build_equity_curve(equity_values, equity_index)
 
@@ -318,11 +260,9 @@ class Backtester:
         profit_factor = self._compute_profit_factor(trades)
         expectancy = self._compute_expectancy(trades)
         final_equity = float(equity_curve.iloc[-1]) if not equity_curve.empty else equity
-        cumulative_return = final_equity - float(resolved_settings.initial_equity)
+        cumulative_return = final_equity - starting_equity
         cumulative_return_pct = (
-            (final_equity / float(resolved_settings.initial_equity) - 1) * 100
-            if resolved_settings.initial_equity
-            else 0.0
+            (final_equity / starting_equity - 1) * 100 if starting_equity else 0.0
         )
 
         r_distribution = self._build_r_distribution(trades)
@@ -338,19 +278,25 @@ class Backtester:
 
         trade_log_path: Optional[Path] = None
         equity_curve_path: Optional[Path] = None
-        if resolved_settings.export_directory:
-            trade_log_path, equity_curve_path = self._export_results(
-                resolved_settings.export_directory,
+        metrics_path: Optional[Path] = None
+        if export_directory:
+            trade_log_path, equity_curve_path, metrics_path = self._export_results(
+                export_directory,
                 trades,
                 equity_curve,
                 r_distribution,
-                resolved_settings,
+                starting_equity,
+                average_r,
+                profit_factor,
             )
 
         metadata = {
-            "max_daily_loss_pct": resolved_settings.max_daily_loss_pct,
             "risk_per_trade_pct": resolved_settings.risk_per_trade_pct,
+            "rr_ratio": resolved_settings.rr_ratio,
+            "sl_ratio": resolved_settings.sl_ratio,
         }
+        if metrics_path is not None:
+            metadata["metrics_path"] = str(metrics_path)
 
         return BacktestResult(
             trades=trades,
@@ -385,30 +331,11 @@ class Backtester:
         self,
         settings: Optional[BacktestSettings],
         *,
-        initial_equity: Optional[float],
         risk: Optional[float],
     ) -> BacktestSettings:
-        if settings is None:
-            base = BacktestSettings()
-        else:
-            base = settings
-
-        if initial_equity is not None or risk is not None:
-            base = replace(
-                base,
-                **{
-                    k: v
-                    for k, v in {
-                        "initial_equity": initial_equity
-                        if initial_equity is not None
-                        else base.initial_equity,
-                        "risk_per_trade_pct": risk
-                        if risk is not None
-                        else base.risk_per_trade_pct,
-                    }.items()
-                    if v is not None
-                },
-            )
+        base = settings or BacktestSettings()
+        if risk is not None:
+            base = replace(base, risk_per_trade_pct=risk)
         return base
 
     def _compute_atr(self, period: int) -> pd.Series:
@@ -445,28 +372,6 @@ class Backtester:
             return float(series.iloc[0])
         return float(before.iloc[-1])
 
-    def _is_signal_enabled(
-        self, signal: TradeSignal, settings: BacktestSettings
-    ) -> bool:
-        if not settings.strategies:
-            return True
-        if signal.client_tag is None:
-            return True
-        enabled = settings.strategies.get(signal.client_tag)
-        return bool(enabled) if enabled is not None else True
-
-    def _within_session(
-        self, timestamp: datetime, settings: BacktestSettings
-    ) -> bool:
-        if not settings.use_session_limits:
-            return True
-        ts_time = timestamp.time()
-        if settings.session_start and ts_time < settings.session_start:
-            return False
-        if settings.session_end and ts_time > settings.session_end:
-            return False
-        return True
-
     def _prepare_signal_levels(
         self,
         signal: TradeSignal,
@@ -475,51 +380,34 @@ class Backtester:
         *,
         settings: BacktestSettings,
     ) -> Tuple[TradeSignal, float]:
-        stop_price = signal.stop_loss
-        stop_distance = 0.0
-        if stop_price is not None:
-            stop_distance = abs(entry_price - float(stop_price))
+        base_distance = 0.0
 
-        if stop_distance <= 0:
-            stop_distance = atr_value * settings.default_stop_atr_multiplier
+        if signal.stop_loss is not None:
+            base_distance = abs(entry_price - float(signal.stop_loss))
+        elif signal.take_profit is not None and settings.rr_ratio > 0:
+            base_distance = abs(float(signal.take_profit) - entry_price) / settings.rr_ratio
+        elif atr_value > 0:
+            base_distance = atr_value
 
-        if stop_distance <= 0:
-            stop_distance = entry_price * 0.01  # Fallback 1%
+        if base_distance <= 0:
+            base_distance = entry_price * 0.01
+
+        stop_distance = settings.sl_ratio * base_distance
+        take_distance = settings.rr_ratio * base_distance
 
         if signal.side == "BUY":
             resolved_stop = entry_price - stop_distance
-            resolved_take = entry_price + 2 * stop_distance
+            resolved_take = entry_price + take_distance
         else:
             resolved_stop = entry_price + stop_distance
-            resolved_take = entry_price - 2 * stop_distance
-
-        if signal.take_profit is not None:
-            resolved_take = float(signal.take_profit)
-
-        trailing_delta: Optional[float] = signal.trailing_delta
-        if settings.use_trailing_stop:
-            if settings.trailing_method == "atr":
-                trailing_delta = atr_value * settings.trailing_atr_multiplier
-            else:
-                trailing_delta = entry_price * settings.trailing_percent / 100
+            resolved_take = entry_price - take_distance
 
         adjusted_signal = replace(
             signal,
             stop_loss=resolved_stop,
             take_profit=resolved_take,
-            trailing_delta=trailing_delta,
         )
-        return adjusted_signal, stop_distance
-
-    @staticmethod
-    def _apply_slippage(
-        price: float, side: str, settings: BacktestSettings
-    ) -> float:
-        slippage = settings.slippage_pct / 100
-        if slippage <= 0:
-            return price
-        adjustment = price * slippage
-        return price + adjustment if side == "BUY" else price - adjustment
+        return adjusted_signal, abs(entry_price - resolved_stop)
 
     def _compute_commissions(
         self,
@@ -528,15 +416,11 @@ class Backtester:
         quantity: float,
         settings: BacktestSettings,
     ) -> float:
-        rate_entry = settings.maker_commission_pct
-        if rate_entry is None:
-            rate_entry = settings.commission_pct
-        rate_exit = settings.taker_commission_pct
-        if rate_exit is None:
-            rate_exit = settings.commission_pct
-        entry_fee = entry_price * quantity * rate_entry / 100 if rate_entry else 0.0
-        exit_fee = exit_price * quantity * rate_exit / 100 if rate_exit else 0.0
-        return entry_fee + exit_fee
+        rate = settings.commission_pct / 100
+        if rate <= 0:
+            return 0.0
+        trade_value = entry_price + exit_price
+        return trade_value * quantity * rate
 
     def _build_equity_curve(
         self, equity_values: List[float], equity_index: List[datetime]
@@ -577,8 +461,10 @@ class Backtester:
         trades: Sequence[TradeRecord],
         equity_curve: pd.Series,
         r_distribution: pd.Series,
-        settings: BacktestSettings,
-    ) -> tuple[Optional[Path], Optional[Path]]:
+        starting_equity: float,
+        average_r: float,
+        profit_factor: float,
+    ) -> tuple[Optional[Path], Optional[Path], Optional[Path]]:
         directory = Path(directory).expanduser().resolve()
         directory.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
@@ -586,20 +472,41 @@ class Backtester:
         equity_path = directory / f"equity-{timestamp}.csv"
         summary_path = directory / f"summary-{timestamp}.json"
         r_path = directory / f"r-multiples-{timestamp}.csv"
+        metrics_path = directory / f"asd-{timestamp}.csv"
+        latest_metrics_path = directory / "asd.csv"
 
         trades_frame = pd.DataFrame([trade.as_dict() for trade in trades])
         trades_frame.to_csv(trade_path, index=False)
         equity_curve.to_csv(equity_path, header=True)
         r_distribution.to_csv(r_path, header=True)
 
+        final_equity = float(equity_curve.iloc[-1]) if not equity_curve.empty else starting_equity
         summary = {
-            "initial_equity": settings.initial_equity,
-            "final_equity": float(equity_curve.iloc[-1]) if not equity_curve.empty else settings.initial_equity,
+            "initial_equity": starting_equity,
+            "final_equity": final_equity,
             "total_trades": len(trades),
             "generated_at": timestamp,
         }
         summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
-        return trade_path, equity_path
+        r_values = [trade.r_multiple for trade in trades if trade.r_multiple is not None]
+        distribution_metrics = trade_distribution_metrics(r_values)
+        metrics_row = {
+            "Initial Equity": starting_equity,
+            "Final Equity": final_equity,
+            "Total Trades": len(trades),
+            "Winrate %": distribution_metrics["Winrate"] * 100,
+            "Average R Multiple": average_r,
+            "Average Win (R)": distribution_metrics["Average Win (R)"],
+            "Average Loss (R)": distribution_metrics["Average Loss (R)"],
+            "RR Effective": distribution_metrics["RR Effective"],
+            "Breakeven Winrate %": distribution_metrics["Breakeven Winrate %"],
+            "Expectancy (R)": distribution_metrics["Expectancy (R)"],
+            "Profit Factor": profit_factor,
+        }
+        metrics_df = pd.DataFrame([metrics_row])
+        metrics_df.to_csv(metrics_path, index=False)
+        metrics_df.to_csv(latest_metrics_path, index=False)
+        return trade_path, equity_path, metrics_path
 
     def _simulate_signal(
         self,
@@ -628,20 +535,6 @@ class Backtester:
             entry_df = self.ohlcv.iloc[entry_position:]
 
         atr_value = float(self._lookup_series_value(atr_series, entry_time))
-        if settings.volatility_atr_threshold is not None and atr_value < settings.volatility_atr_threshold:
-            return None
-
-        if "volume" in entry_df.columns:
-            lookback = max(1, settings.atr_period)
-            volume_window = self.ohlcv.iloc[max(entry_position - lookback, 0):entry_position][
-                "volume"
-            ]
-            avg_volume = float(volume_window.mean()) if not volume_window.empty else float(
-                entry_df.iloc[0]["volume"]
-            )
-            current_volume = float(entry_df.iloc[0]["volume"])
-            if avg_volume > 0 and current_volume < settings.min_volume_ratio * avg_volume:
-                return None
 
         adjusted_signal, stop_distance = self._prepare_signal_levels(
             signal,
@@ -650,15 +543,10 @@ class Backtester:
             settings=settings,
         )
 
-        entry_price = self._apply_slippage(entry_price, adjusted_signal.side, settings)
-
         exit_time, exit_price, status = self._simulate_exit(
             adjusted_signal,
             entry_price,
             entry_df,
-            settings=settings,
-            stop_distance=stop_distance,
-            atr_series=atr_series,
         )
 
         target_risk = max(account_equity * settings.risk_per_trade_pct / 100, 0.0)
@@ -780,85 +668,30 @@ class Backtester:
         signal: TradeSignal,
         entry_price: float,
         entry_df: pd.DataFrame,
-        *,
-        settings: BacktestSettings,
-        stop_distance: float,
-        atr_series: pd.Series,
     ) -> tuple[datetime, float, OrderStatus]:
         stop_price = float(signal.stop_loss) if signal.stop_loss is not None else None
         take_profit = (
             float(signal.take_profit) if signal.take_profit is not None else None
         )
-        trailing_active = False
-        trailing_stop: Optional[float] = stop_price
-        activation_price = None
-        if stop_distance > 0 and settings.trailing_activation_r > 0:
-            if signal.side == "BUY":
-                activation_price = entry_price + stop_distance * settings.trailing_activation_r
-            else:
-                activation_price = entry_price - stop_distance * settings.trailing_activation_r
-
         for _, row in entry_df.iterrows():
             current_time = row.name
             high = float(row["high"])
             low = float(row["low"])
 
-            if settings.use_trailing_stop and activation_price is not None and not trailing_active:
-                if signal.side == "BUY" and high >= activation_price:
-                    trailing_active = True
-                elif signal.side == "SELL" and low <= activation_price:
-                    trailing_active = True
-
-            if settings.use_trailing_stop and trailing_active:
-                if settings.trailing_method == "atr":
-                    atr_value = self._lookup_series_value(atr_series, current_time)
-                    trailing_delta = atr_value * settings.trailing_atr_multiplier
-                else:
-                    trailing_delta = entry_price * settings.trailing_percent / 100
-
-                if signal.side == "BUY":
-                    candidate = high - trailing_delta
-                    trailing_stop = max(trailing_stop or -np.inf, candidate)
-                else:
-                    candidate = low + trailing_delta
-                    trailing_stop = min(trailing_stop or np.inf, candidate)
-
             if signal.side == "BUY":
-                stop_candidate = trailing_stop if trailing_stop is not None else stop_price
-                if stop_candidate is not None and low <= stop_candidate:
-                    exit_price = self._apply_slippage(
-                        float(stop_candidate), "SELL", settings
-                    )
-                    return current_time, exit_price, OrderStatus.FILLED
+                if stop_price is not None and low <= stop_price:
+                    return current_time, float(stop_price), OrderStatus.FILLED
                 if take_profit is not None and high >= take_profit:
-                    exit_price = self._apply_slippage(
-                        float(take_profit), "SELL", settings
-                    )
-                    return current_time, exit_price, OrderStatus.FILLED
+                    return current_time, float(take_profit), OrderStatus.FILLED
             else:
-                stop_candidate = trailing_stop if trailing_stop is not None else stop_price
-                if stop_candidate is not None and high >= stop_candidate:
-                    exit_price = self._apply_slippage(
-                        float(stop_candidate), "BUY", settings
-                    )
-                    return current_time, exit_price, OrderStatus.FILLED
+                if stop_price is not None and high >= stop_price:
+                    return current_time, float(stop_price), OrderStatus.FILLED
                 if take_profit is not None and low <= take_profit:
-                    exit_price = self._apply_slippage(
-                        float(take_profit), "BUY", settings
-                    )
-                    return current_time, exit_price, OrderStatus.FILLED
+                    return current_time, float(take_profit), OrderStatus.FILLED
 
         last_row = entry_df.iloc[-1]
-        final_price = self._apply_slippage(
-            float(last_row[self.price_column]),
-            "SELL" if signal.side == "BUY" else "BUY",
-            settings,
-        )
-        return (
-            entry_df.index[-1],
-            final_price,
-            OrderStatus.EXPIRED,
-        )
+        final_price = float(last_row[self.price_column])
+        return (entry_df.index[-1], final_price, OrderStatus.EXPIRED)
 
     @staticmethod
     def _compute_pnl(

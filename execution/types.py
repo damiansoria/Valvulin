@@ -34,7 +34,6 @@ class TradeSignal:
     entry_price: Optional[float] = None
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
-    trailing_delta: Optional[float] = None
     client_tag: Optional[str] = None
 
 

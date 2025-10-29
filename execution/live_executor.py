@@ -1,7 +1,6 @@
 """Live execution helper for Binance trading."""
 from __future__ import annotations
 
-import math
 import time
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional
@@ -29,7 +28,6 @@ ORDER_TYPE_MARKET = getattr(Client, "ORDER_TYPE_MARKET", "MARKET")
 ORDER_TYPE_LIMIT = getattr(Client, "ORDER_TYPE_LIMIT", "LIMIT")
 ORDER_TYPE_STOP_LOSS_LIMIT = getattr(Client, "ORDER_TYPE_STOP_LOSS_LIMIT", "STOP_LOSS_LIMIT")
 ORDER_TYPE_TAKE_PROFIT_LIMIT = getattr(Client, "ORDER_TYPE_TAKE_PROFIT_LIMIT", "TAKE_PROFIT_LIMIT")
-ORDER_TYPE_TRAILING_STOP_MARKET = getattr(Client, "FUTURE_ORDER_TYPE_TRAILING_STOP_MARKET", "TRAILING_STOP_MARKET")
 TIME_IN_FORCE_GTC = getattr(Client, "TIME_IN_FORCE_GTC", "GTC")
 
 
@@ -58,8 +56,6 @@ class PaperPosition:
     quantity: float
     stop_loss: Optional[float]
     take_profit: Optional[float]
-    trailing_delta: Optional[float]
-    trailing_stop: Optional[float]
     order_id: str
     created_at: float = field(default_factory=time.time)
 
@@ -110,8 +106,6 @@ class PaperBroker:
                 quantity=signal.quantity,
                 stop_loss=signal.stop_loss,
                 take_profit=signal.take_profit,
-                trailing_delta=signal.trailing_delta,
-                trailing_stop=self._initial_trailing(signal, fill_price),
                 order_id=order_id,
             )
             self.positions[order_id] = position
@@ -162,9 +156,7 @@ class PaperBroker:
             entry_price=fill_price,
             quantity=order.signal.quantity,
             stop_loss=order.signal.stop_loss,
-            take_profit=order.signal.take_profit,
-            trailing_delta=order.signal.trailing_delta,
-            trailing_stop=self._initial_trailing(order.signal, fill_price),
+                take_profit=order.signal.take_profit,
             order_id=order.order_id,
         )
         self.positions[order.order_id] = position
@@ -174,26 +166,16 @@ class PaperBroker:
         exit_price = None
         status = OrderStatus.FILLED
 
-        if position.trailing_delta is not None:
-            if signal.side == "BUY":
-                position.trailing_stop = max(position.trailing_stop or -math.inf, price - position.trailing_delta)
-            else:
-                position.trailing_stop = min(position.trailing_stop or math.inf, price + position.trailing_delta)
-
         if signal.side == "BUY":
             if position.stop_loss is not None and price <= position.stop_loss:
                 exit_price = position.stop_loss
             elif position.take_profit is not None and price >= position.take_profit:
                 exit_price = position.take_profit
-            elif position.trailing_stop is not None and price <= position.trailing_stop:
-                exit_price = position.trailing_stop
         else:
             if position.stop_loss is not None and price >= position.stop_loss:
                 exit_price = position.stop_loss
             elif position.take_profit is not None and price <= position.take_profit:
                 exit_price = position.take_profit
-            elif position.trailing_stop is not None and price >= position.trailing_stop:
-                exit_price = position.trailing_stop
 
         return exit_price, status
 
@@ -211,13 +193,6 @@ class PaperBroker:
             filled_quantity=position.quantity,
             extra={"pnl": pnl},
         )
-
-    def _initial_trailing(self, signal: TradeSignal, entry_price: float) -> Optional[float]:
-        if signal.trailing_delta is None:
-            return None
-        if signal.side == "BUY":
-            return entry_price - signal.trailing_delta
-        return entry_price + signal.trailing_delta
 
     def _next_order_id(self) -> str:
         self._order_seq += 1
@@ -398,19 +373,6 @@ class LiveExecutor:
                 )
                 stop_id = str(response.get("orderId"))
 
-        if signal.trailing_delta is not None:
-            callback_rate = self._trailing_callback(signal.trailing_delta, entry_price)
-            if callback_rate is not None:
-                response = self._call_with_retries(
-                    self.client.create_order,
-                    symbol=signal.symbol,
-                    side=closing_side,
-                    type=ORDER_TYPE_TRAILING_STOP_MARKET,
-                    quantity=self._format_quantity(signal.quantity),
-                    callbackRate=self._format_price(callback_rate),
-                )
-                stop_id = str(response.get("orderId"))
-
         return stop_id, take_id
 
     def _await_fill(self, symbol: str, order_id: str) -> dict:
@@ -451,9 +413,3 @@ class LiveExecutor:
         price = order.get("price")
         return float(price) if price else None
 
-    @staticmethod
-    def _trailing_callback(delta: float, entry_price: Optional[float]) -> Optional[float]:
-        if entry_price is None or entry_price == 0:
-            return None
-        rate = abs(delta / entry_price) * 100
-        return max(0.1, min(rate, 5.0))

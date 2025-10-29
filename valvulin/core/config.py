@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from datetime import datetime, time
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -115,38 +115,12 @@ class ConfigLoader:
         return env
 
     def _normalise_backtester(self, config: Dict[str, Any]) -> Dict[str, Any]:
-        cfg = dict(config)
-        cfg.pop("engine", None)
-        trading_hours = cfg.pop("trading_hours", None)
-        if trading_hours:
-            start = trading_hours.get("start")
-            end = trading_hours.get("end")
-            if start:
-                cfg["session_start"] = self._parse_time(start)
-            if end:
-                cfg["session_end"] = self._parse_time(end)
-            cfg.setdefault("use_session_limits", True)
-        else:
-            if "session_start" in cfg:
-                cfg["session_start"] = self._parse_time(cfg["session_start"])
-            if "session_end" in cfg:
-                cfg["session_end"] = self._parse_time(cfg["session_end"])
-
-        if "export_directory" in cfg and cfg["export_directory"]:
-            cfg["export_directory"] = Path(cfg["export_directory"]).expanduser()
-
+        allowed = {"risk_per_trade_pct", "rr_ratio", "sl_ratio", "commission_pct"}
+        cfg: Dict[str, Any] = {}
+        for key in allowed:
+            if key in config and config[key] is not None:
+                cfg[key] = float(config[key])
         return cfg
-
-    @staticmethod
-    def _parse_time(value: Any) -> Optional[time]:
-        if value in (None, ""):
-            return None
-        if isinstance(value, datetime):
-            return value.time()
-        if isinstance(value, str):
-            return datetime.strptime(value, "%H:%M").time()
-        raise ValueError(f"Cannot parse time value: {value!r}")
-
 
 __all__ = [
     "AppConfig",

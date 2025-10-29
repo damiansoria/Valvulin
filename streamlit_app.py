@@ -345,6 +345,12 @@ elif tab == "🔁 Backtesting":
     riesgo_por_trade = st.number_input(
         "🎯 Riesgo por operación (%)", min_value=0.1, value=1.0, step=0.1
     )
+    sl_ratio = st.number_input(
+        "🛑 Stop Loss (R)", min_value=0.1, value=1.0, step=0.1
+    )
+    tp_ratio = st.number_input(
+        "🎯 Take Profit (R)", min_value=0.1, value=2.0, step=0.1
+    )
 
     estrategias_seleccionadas = st.multiselect(
         "🧩 Estrategias a combinar",
@@ -436,6 +442,8 @@ elif tab == "🔁 Backtesting":
                         strategy_params,
                         capital_inicial=capital_inicial,
                         riesgo_por_trade=riesgo_por_trade,
+                        sl_ratio=sl_ratio,
+                        tp_ratio=tp_ratio,
                         logica=logica_combinacion,
                     )
                 st.session_state["backtest_result"] = {
@@ -445,6 +453,8 @@ elif tab == "🔁 Backtesting":
                     "strategies": estrategias_seleccionadas,
                     "capital_inicial": capital_inicial,
                     "riesgo": riesgo_por_trade,
+                    "sl_ratio": sl_ratio,
+                    "tp_ratio": tp_ratio,
                     "logica": logica_combinacion,
                 }
                 st.success("✅ Backtest completado.")
