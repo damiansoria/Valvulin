@@ -43,7 +43,6 @@ def calculate_position_size(
     stop_loss_price: Optional[float] = None,
     stop_distance: Optional[float] = None,
     atr: Optional[float] = None,
-    atr_multiplier: float = 1.0,
     point_value: float = 1.0,
     min_size: Optional[float] = None,
     max_size: Optional[float] = None,
@@ -56,7 +55,7 @@ def calculate_position_size(
 
     * Explicit stop loss price (``stop_loss_price``).
     * Fixed distance in price units (``stop_distance``).
-    * ATR derived distance (``atr`` with ``atr_multiplier``).
+    * ATR derived distance (``atr``).
 
     Parameters
     ----------
@@ -75,10 +74,8 @@ def calculate_position_size(
         the distance is defined in points/pips.
     atr:
         Average True Range. When no stop loss price or explicit stop
-        distance are supplied, the stop distance is derived as
-        ``atr * atr_multiplier``.
-    atr_multiplier:
-        Multiplier applied to the ATR when deriving the stop distance.
+        distance are supplied, the stop distance is derived directly from
+        the ATR value.
     point_value:
         Monetary value of a single price unit. For stocks it is typically
         1, while for futures or forex it depends on the contract specs.
@@ -111,7 +108,7 @@ def calculate_position_size(
     elif stop_distance is not None:
         resolved_stop_distance = stop_distance
     elif atr is not None:
-        resolved_stop_distance = atr * atr_multiplier
+        resolved_stop_distance = atr
 
     if resolved_stop_distance is None or resolved_stop_distance <= 0:
         raise ValueError(
