@@ -40,17 +40,12 @@ def test_backtester_updates_equity_with_risk_management():
     ]
 
     settings = BacktestSettings(
-        initial_equity=1_000.0,
         risk_per_trade_pct=1.0,
+        rr_ratio=2.0,
+        sl_ratio=1.0,
         commission_pct=0.0,
-        maker_commission_pct=0.0,
-        taker_commission_pct=0.0,
-        use_trailing_stop=False,
-        min_volume_ratio=0.0,
-        volatility_atr_threshold=None,
-        export_directory=None,
     )
-    result = backtester.run(signals, settings=settings)
+    result = backtester.run(signals, settings=settings, initial_equity=1_000.0)
 
     assert pytest.approx(result.final_equity, rel=1e-6) == 1009.8
     assert result.total_trades == 2

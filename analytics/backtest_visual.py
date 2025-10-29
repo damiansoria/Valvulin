@@ -115,6 +115,12 @@ def calculate_metrics(trades_df: pd.DataFrame, equity_curve: pd.Series) -> Dict[
         if total_trades
         else 0.0
     )
+    rr_effective = avg_win_r / abs(avg_loss_r) if avg_loss_r != 0 else np.inf
+    breakeven_winrate = (
+        abs(avg_loss_r) / (abs(avg_loss_r) + avg_win_r) * 100
+        if (avg_win_r + abs(avg_loss_r)) > 0
+        else 0.0
+    )
     expectancy_usd = float(trades_df["pnl_usd"].mean()) if total_trades else 0.0
 
     gross_profit = wins["pnl_usd"].sum()
@@ -140,6 +146,10 @@ def calculate_metrics(trades_df: pd.DataFrame, equity_curve: pd.Series) -> Dict[
         "Average R Multiple": round(avg_r, 3),
         "Expectancy R": round(expectancy_r, 3),
         "Expectancy $": round(expectancy_usd, 2),
+        "Average Win (R)": round(avg_win_r, 3),
+        "Average Loss (R)": round(avg_loss_r, 3),
+        "RR Effective": round(rr_effective, 3) if np.isfinite(rr_effective) else np.inf,
+        "Breakeven Winrate %": round(breakeven_winrate, 2),
         "Average Trade %": round(avg_trade_pct, 3),
         "Median Trade %": round(median_trade_pct, 3),
         "Max Drawdown %": round(max_drawdown_pct, 2),
@@ -171,7 +181,8 @@ def run_backtest(
     params: Dict[str, Dict[str, float]] | Dict[str, float] | None,
     capital_inicial: float = 1_000.0,
     riesgo_por_trade: float = 1.0,
-    stop_loss_pct: float = 2.0,
+    sl_ratio: float = 1.0,
+    tp_ratio: float = 2.0,
     logica: str = "AND",
 ) -> StrategyResult:
     """Ejecuta un backtest incorporando simulación monetaria y métricas completas."""
@@ -219,8 +230,9 @@ def run_backtest(
     trades: List[Dict[str, float | str | pd.Timestamp | None]] = []
 
     riesgo_fraccion = float(riesgo_por_trade) / 100
-    stop_loss_fraction = float(stop_loss_pct) / 100 if stop_loss_pct > 0 else None
-    fallback_stop_fraction = stop_loss_fraction if stop_loss_fraction and stop_loss_fraction > 0 else 0.01
+    sl_ratio = float(sl_ratio) if sl_ratio > 0 else 1.0
+    tp_ratio = float(tp_ratio) if tp_ratio > 0 else 2.0
+    base_fraction = 0.01
 
     equity_values: List[float] = []
     equity_timestamps: List[pd.Timestamp] = []
@@ -254,15 +266,22 @@ def run_backtest(
     entry_risk_amount = 0.0
     entry_position_size = 0.0
     entry_stop_price: Optional[float] = None
+    entry_take_price: Optional[float] = None
 
-    def _compute_stop_price(price: float, side: int) -> float:
-        pct = stop_loss_fraction if stop_loss_fraction and stop_loss_fraction > 0 else fallback_stop_fraction
-        if pct <= 0:
-            pct = fallback_stop_fraction
-        return price * (1 - pct) if side == 1 else price * (1 + pct)
+    def _compute_levels(price: float, side: int) -> tuple[float, float, float]:
+        distance = price * base_fraction
+        stop_distance = distance * sl_ratio
+        take_distance = distance * tp_ratio
+        if side == 1:
+            stop_price = price - stop_distance
+            take_price = price + take_distance
+        else:
+            stop_price = price + stop_distance
+            take_price = price - take_distance
+        return stop_price, take_price, stop_distance
 
     def _open_position(signal_value: int, price_value: float, timestamp_value: pd.Timestamp) -> None:
-        nonlocal position, entry_price, entry_time, entry_capital, entry_risk_amount, entry_position_size, entry_stop_price
+        nonlocal position, entry_price, entry_time, entry_capital, entry_risk_amount, entry_position_size, entry_stop_price, entry_take_price
 
         if signal_value == 0:
             return
@@ -270,8 +289,9 @@ def run_backtest(
         risk_amount = current_capital * riesgo_fraccion
         if risk_amount <= 0 or price_value <= 0:
             return
-        stop_price_value = _compute_stop_price(price_value, signal_value)
-        stop_distance = abs(price_value - stop_price_value)
+        stop_price_value, take_price_value, stop_distance = _compute_levels(
+            price_value, signal_value
+        )
         if stop_distance <= 0:
             return
         position_size_value = risk_amount / stop_distance
@@ -284,6 +304,7 @@ def run_backtest(
         entry_risk_amount = risk_amount
         entry_position_size = position_size_value
         entry_stop_price = stop_price_value
+        entry_take_price = take_price_value
 
     for _, row in df.iterrows():
         signal = int(row.get("signal", 0))
@@ -325,6 +346,7 @@ def run_backtest(
                 "capital_inicial": entry_capital,
                 "capital_final": capital,
                 "stop_price": entry_stop_price,
+                "take_profit_price": entry_take_price,
             }
         )
         equity_values.append(capital)
@@ -337,6 +359,7 @@ def run_backtest(
             entry_risk_amount = 0.0
             entry_position_size = 0.0
             entry_stop_price = None
+            entry_take_price = None
         else:
             position = 0
             entry_price = 0.0
@@ -344,6 +367,7 @@ def run_backtest(
             entry_risk_amount = 0.0
             entry_position_size = 0.0
             entry_stop_price = None
+            entry_take_price = None
             _open_position(signal, price, timestamp)
 
     if position != 0 and entry_price > 0:
@@ -374,6 +398,7 @@ def run_backtest(
                 "capital_inicial": entry_capital,
                 "capital_final": capital,
                 "stop_price": entry_stop_price,
+                "take_profit_price": entry_take_price,
             }
         )
         equity_values.append(capital)
