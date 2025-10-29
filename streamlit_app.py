@@ -698,11 +698,6 @@ elif tab == "📊 Analytics":
         trades_df = trades_df.copy()
         trades_df, translation_applied = normalize_trade_dataframe(trades_df)
 
-        if translation_applied:
-            st.sidebar.info(
-                "✅ CSV detectado correctamente. Columnas estandarizadas para análisis."
-            )
-
         required_columns = {
             "timestamp",
             "symbol",
@@ -719,6 +714,11 @@ elif tab == "📊 Analytics":
                 + ", ".join(sorted(missing_columns))
             )
         else:
+            if translation_applied:
+                st.sidebar.info(
+                    "✅ CSV detectado correctamente. Columnas normalizadas para análisis."
+                )
+
             trades_df["timestamp"] = pd.to_datetime(
                 trades_df["timestamp"], errors="coerce"
             )
