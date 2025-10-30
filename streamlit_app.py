@@ -883,9 +883,30 @@ elif tab == "📊 Analytics":
                     end_ts = pd.Timestamp(end_date) + pd.Timedelta(days=1) - pd.Timedelta(
                         microseconds=1
                     )
-                    filtered_df = filtered_df[
-                        filtered_df["timestamp"].between(start_ts, end_ts)
-                    ]
+
+                    timestamp_series = filtered_df["timestamp"]
+                    if pd.api.types.is_datetime64_any_dtype(timestamp_series):
+                        tz = None
+                        if pd.api.types.is_datetime64tz_dtype(timestamp_series):
+                            tz = timestamp_series.dt.tz
+
+                        if tz is not None:
+                            if start_ts.tzinfo is None:
+                                start_ts = start_ts.tz_localize(tz)
+                            else:
+                                start_ts = start_ts.tz_convert(tz)
+
+                            if end_ts.tzinfo is None:
+                                end_ts = end_ts.tz_localize(tz)
+                            else:
+                                end_ts = end_ts.tz_convert(tz)
+
+                        filtered_df = filtered_df[timestamp_series.between(start_ts, end_ts)]
+                    else:
+                        timestamp_values = pd.to_datetime(timestamp_series, errors="coerce")
+                        filtered_df = filtered_df[
+                            timestamp_values.between(start_ts, end_ts)
+                        ]
 
             if filtered_df.empty:
                 st.warning("No hay operaciones para los filtros seleccionados.")
