@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Mapping
 
 import numpy as np
 import pandas as pd
@@ -14,6 +14,11 @@ import streamlit as st
 import yaml
 
 from analytics.backtest_visual import run_backtest
+from analytics.backtest_storage import (
+    list_backtest_runs,
+    load_backtest_run,
+    save_backtest_run,
+)
 from analytics.csv_normalization import normalize_trade_dataframe
 from analytics.metrics import compute_backtest_summary_metrics, prepare_drawdown_columns
 from analytics.plot_utils import (
@@ -454,7 +459,20 @@ elif tab == "🔁 Backtesting":
                         sl_ratio=sl_ratio,
                         tp_ratio=tp_ratio,
                         logica=logica_combinacion,
+                        symbol=symbol,
                     )
+                saved_run = save_backtest_run(
+                    result,
+                    symbol=symbol,
+                    interval=interval,
+                    strategies=estrategias_seleccionadas,
+                    params=strategy_params,
+                    capital_inicial=capital_inicial,
+                    riesgo_por_trade=riesgo_por_trade,
+                    sl_ratio=sl_ratio,
+                    tp_ratio=tp_ratio,
+                    logica=logica_combinacion,
+                )
                 st.session_state["backtest_result"] = {
                     "result": result,
                     "symbol": symbol,
@@ -465,8 +483,12 @@ elif tab == "🔁 Backtesting":
                     "sl_ratio": sl_ratio,
                     "tp_ratio": tp_ratio,
                     "logica": logica_combinacion,
+                    "run_id": saved_run.run_id,
+                    "metadata": saved_run.metadata,
                 }
-                st.success("✅ Backtest completado.")
+                st.success(
+                    "✅ Backtest completado y guardado en la sección 📊 Analytics."
+                )
             except ValueError as exc:
                 st.error(f"❌ {exc}")
 
@@ -641,62 +663,91 @@ elif tab == "📊 Analytics":
     st.title("📊 Valvulin Backtest Analytics")
 
     st.sidebar.header("📁 Resultados del Backtest")
-    trades_file = st.sidebar.file_uploader(
-        "Carga el CSV de trades", type=["csv"], key="analytics_trades_uploader"
-    )
-    trades_path_input = st.sidebar.text_input(
-        "Ruta alternativa del CSV de trades", value="", key="analytics_trades_path"
-    )
-
-    summary_file = st.sidebar.file_uploader(
-        "Carga el CSV de métricas (opcional)",
-        type=["csv"],
-        key="analytics_summary_uploader",
-    )
-    summary_path_input = st.sidebar.text_input(
-        "Ruta alternativa del CSV de métricas (opcional)",
-        value="",
-        key="analytics_summary_path",
+    saved_runs = list_backtest_runs()
+    saved_lookup = {run.label(): run for run in saved_runs}
+    manual_option = "📤 Cargar archivos manualmente"
+    select_options = [manual_option, *saved_lookup.keys()]
+    default_index = 0 if not saved_runs else 1
+    selected_option = st.sidebar.selectbox(
+        "Selecciona un backtest guardado",
+        select_options,
+        index=min(default_index, len(select_options) - 1),
     )
 
-    trades_df = None
-    summary_df = None
+    trades_df: pd.DataFrame | None = None
+    summary_df: pd.DataFrame | Mapping[str, float] | None = None
+    metadata_selected: Dict[str, Any] | None = None
+    translation_applied = False
 
-    if trades_file is not None:
-        try:
-            trades_df = pd.read_csv(trades_file)
-        except Exception as exc:  # pragma: no cover - defensive UI feedback
-            st.sidebar.error(f"No se pudo leer el CSV de trades: {exc}")
-    elif trades_path_input:
-        trades_path = Path(trades_path_input).expanduser()
-        if trades_path.exists():
+    if selected_option != manual_option:
+        selected_run = saved_lookup[selected_option]
+        trades_raw, summary_raw = load_backtest_run(selected_run)
+        trades_df = trades_raw
+        if summary_raw is not None:
+            if set(summary_raw.columns) >= {"metric", "value"}:
+                summary_df = dict(zip(summary_raw["metric"], summary_raw["value"]))
+            else:
+                summary_df = summary_raw
+        metadata_selected = selected_run.metadata
+    else:
+        trades_file = st.sidebar.file_uploader(
+            "Carga el CSV de trades", type=["csv"], key="analytics_trades_uploader"
+        )
+        trades_path_input = st.sidebar.text_input(
+            "Ruta alternativa del CSV de trades",
+            value="",
+            key="analytics_trades_path",
+        )
+
+        summary_file = st.sidebar.file_uploader(
+            "Carga el CSV de métricas (opcional)",
+            type=["csv"],
+            key="analytics_summary_uploader",
+        )
+        summary_path_input = st.sidebar.text_input(
+            "Ruta alternativa del CSV de métricas (opcional)",
+            value="",
+            key="analytics_summary_path",
+        )
+
+        if trades_file is not None:
             try:
-                trades_df = pd.read_csv(trades_path)
+                trades_df = pd.read_csv(trades_file)
             except Exception as exc:  # pragma: no cover - defensive UI feedback
                 st.sidebar.error(f"No se pudo leer el CSV de trades: {exc}")
-        else:
-            st.sidebar.warning("La ruta de trades especificada no existe.")
+        elif trades_path_input:
+            trades_path = Path(trades_path_input).expanduser()
+            if trades_path.exists():
+                try:
+                    trades_df = pd.read_csv(trades_path)
+                except Exception as exc:  # pragma: no cover - defensive UI feedback
+                    st.sidebar.error(f"No se pudo leer el CSV de trades: {exc}")
+            else:
+                st.sidebar.warning("La ruta de trades especificada no existe.")
 
-    if summary_file is not None:
-        try:
-            summary_df = pd.read_csv(summary_file)
-        except Exception as exc:  # pragma: no cover - defensive UI feedback
-            st.sidebar.error(f"No se pudo leer el CSV de métricas: {exc}")
-    elif summary_path_input:
-        summary_path = Path(summary_path_input).expanduser()
-        if summary_path.exists():
+        if summary_file is not None:
             try:
-                summary_df = pd.read_csv(summary_path)
+                summary_df = pd.read_csv(summary_file)
             except Exception as exc:  # pragma: no cover - defensive UI feedback
                 st.sidebar.error(f"No se pudo leer el CSV de métricas: {exc}")
-        else:
-            st.sidebar.warning("La ruta de métricas especificada no existe.")
+        elif summary_path_input:
+            summary_path = Path(summary_path_input).expanduser()
+            if summary_path.exists():
+                try:
+                    summary_df = pd.read_csv(summary_path)
+                except Exception as exc:  # pragma: no cover - defensive UI feedback
+                    st.sidebar.error(f"No se pudo leer el CSV de métricas: {exc}")
+            else:
+                st.sidebar.warning("La ruta de métricas especificada no existe.")
 
     if trades_df is None:
-        st.info("Carga un CSV de operaciones para visualizar los resultados del backtest.")
+        if saved_runs:
+            st.info("Selecciona un backtest guardado o carga archivos manualmente para comenzar.")
+        else:
+            st.info("Carga un CSV de operaciones para visualizar los resultados del backtest.")
     else:
-        trades_df = trades_df.copy()
-        trades_df, translation_applied = normalize_trade_dataframe(trades_df)
+        trades_copy = trades_df.copy()
+        trades_copy, translation_applied = normalize_trade_dataframe(trades_copy)
 
         required_columns = {
             "timestamp",
@@ -707,7 +758,7 @@ elif tab == "📊 Analytics":
             "r_multiple",
             "capital_final",
         }
-        missing_columns = required_columns.difference(trades_df.columns)
+        missing_columns = required_columns.difference(trades_copy.columns)
         if missing_columns:
             st.error(
                 "El CSV de trades debe contener las columnas requeridas: "
@@ -719,8 +770,8 @@ elif tab == "📊 Analytics":
                     "✅ CSV detectado correctamente. Columnas normalizadas para análisis."
                 )
 
-            trades_df["timestamp"] = pd.to_datetime(
-                trades_df["timestamp"], errors="coerce"
+            trades_copy["timestamp"] = pd.to_datetime(
+                trades_copy["timestamp"], errors="coerce"
             )
             for numeric_column in [
                 "entry_price",
@@ -728,17 +779,65 @@ elif tab == "📊 Analytics":
                 "r_multiple",
                 "capital_final",
             ]:
-                trades_df[numeric_column] = pd.to_numeric(
-                    trades_df[numeric_column], errors="coerce"
+                trades_copy[numeric_column] = pd.to_numeric(
+                    trades_copy[numeric_column], errors="coerce"
                 )
-            trades_df.sort_values(by="timestamp", inplace=True)
-            trades_df.dropna(subset=["capital_final", "r_multiple"], inplace=True)
+            trades_copy.sort_values(by="timestamp", inplace=True)
+            trades_copy.dropna(subset=["capital_final", "r_multiple"], inplace=True)
+
+            if metadata_selected:
+                capital_inicial_meta = metadata_selected.get("capital_inicial")
+                capital_final_meta = metadata_selected.get("capital_final")
+                capital_inicial_value = (
+                    float(capital_inicial_meta)
+                    if capital_inicial_meta is not None
+                    else 0.0
+                )
+                capital_final_value = (
+                    float(capital_final_meta)
+                    if capital_final_meta is not None
+                    else 0.0
+                )
+                strategy_label = metadata_selected.get("strategy_label", "-")
+                symbol_label = metadata_selected.get("symbol", "-")
+                executed_at = metadata_selected.get("executed_at")
+                executed_display = executed_at
+                if isinstance(executed_at, str):
+                    try:
+                        executed_display = datetime.fromisoformat(executed_at).strftime(
+                            "%Y-%m-%d %H:%M"
+                        )
+                    except ValueError:
+                        executed_display = executed_at
+                info_box = f"""
+                <div style="background-color:#f5f7ff;border-radius:10px;padding:16px;margin-bottom:1rem;">
+                    <strong>Estrategia:</strong> {strategy_label}<br/>
+                    <strong>Símbolo:</strong> {symbol_label}<br/>
+                    <strong>Capital inicial:</strong> ${capital_inicial_value:,.2f} &nbsp;→&nbsp;
+                    <strong>Capital final:</strong> ${capital_final_value:,.2f}<br/>
+                    <small>Ejecutado: {executed_display}</small>
+                </div>
+                """
+                st.markdown(info_box, unsafe_allow_html=True)
+
+                st.sidebar.markdown("### 📐 Parámetros de la estrategia")
+                parameters = metadata_selected.get("parameters") or {}
+                if parameters:
+                    for name, value in parameters.items():
+                        if isinstance(value, dict):
+                            st.sidebar.markdown(f"**{name}**")
+                            for sub_key, sub_value in value.items():
+                                st.sidebar.markdown(f"- {sub_key}: {sub_value}")
+                        else:
+                            st.sidebar.markdown(f"- **{name}**: {value}")
+                else:
+                    st.sidebar.info("No hay parámetros personalizados registrados para este backtest.")
 
             st.sidebar.subheader("🔍 Filtros")
-            strategy_col = "strategy" if "strategy" in trades_df.columns else None
+            strategy_col = "strategy" if "strategy" in trades_copy.columns else None
             if strategy_col:
                 strategy_options = ["Todas"] + sorted(
-                    trades_df[strategy_col].dropna().astype(str).unique().tolist()
+                    trades_copy[strategy_col].dropna().astype(str).unique().tolist()
                 )
             else:
                 strategy_options = ["Todas"]
@@ -747,13 +846,13 @@ elif tab == "📊 Analytics":
             )
 
             symbol_options = ["Todos"] + sorted(
-                trades_df["symbol"].dropna().astype(str).unique().tolist()
+                trades_copy["symbol"].dropna().astype(str).unique().tolist()
             )
             selected_symbol = st.sidebar.selectbox("Selecciona símbolo", symbol_options)
 
             date_range_value = None
-            if trades_df["timestamp"].notna().any():
-                valid_timestamps = trades_df["timestamp"].dropna()
+            if trades_copy["timestamp"].notna().any():
+                valid_timestamps = trades_copy["timestamp"].dropna()
                 min_date = valid_timestamps.min().date()
                 max_date = valid_timestamps.max().date()
                 date_range_value = st.sidebar.date_input(
@@ -761,7 +860,7 @@ elif tab == "📊 Analytics":
                     value=(min_date, max_date),
                 )
 
-            filtered_df = trades_df
+            filtered_df = trades_copy
             if strategy_col and selected_strategy != "Todas":
                 filtered_df = filtered_df[
                     filtered_df[strategy_col].astype(str) == selected_strategy
@@ -784,16 +883,46 @@ elif tab == "📊 Analytics":
                     end_ts = pd.Timestamp(end_date) + pd.Timedelta(days=1) - pd.Timedelta(
                         microseconds=1
                     )
-                    filtered_df = filtered_df[
-                        filtered_df["timestamp"].between(start_ts, end_ts)
-                    ]
+
+                    timestamp_series = filtered_df["timestamp"]
+                    if pd.api.types.is_datetime64_any_dtype(timestamp_series):
+                        tz = None
+                        if pd.api.types.is_datetime64tz_dtype(timestamp_series):
+                            tz = timestamp_series.dt.tz
+
+                        if tz is not None:
+                            if start_ts.tzinfo is None:
+                                start_ts = start_ts.tz_localize(tz)
+                            else:
+                                start_ts = start_ts.tz_convert(tz)
+
+                            if end_ts.tzinfo is None:
+                                end_ts = end_ts.tz_localize(tz)
+                            else:
+                                end_ts = end_ts.tz_convert(tz)
+
+                        filtered_df = filtered_df[timestamp_series.between(start_ts, end_ts)]
+                    else:
+                        timestamp_values = pd.to_datetime(timestamp_series, errors="coerce")
+                        filtered_df = filtered_df[
+                            timestamp_values.between(start_ts, end_ts)
+                        ]
 
             if filtered_df.empty:
                 st.warning("No hay operaciones para los filtros seleccionados.")
             else:
                 enriched_df = prepare_drawdown_columns(filtered_df)
+                summary_payload = summary_df
+                if isinstance(summary_payload, pd.DataFrame) and set(summary_payload.columns) >= {
+                    "metric",
+                    "value",
+                }:
+                    summary_payload = dict(
+                        zip(summary_payload["metric"], summary_payload["value"])
+                    )
                 summary_metrics = compute_backtest_summary_metrics(
-                    filtered_df, summary_df
+                    filtered_df,
+                    summary_payload,
                 )
 
                 st.subheader("🧾 Summary Metrics")
@@ -818,20 +947,24 @@ elif tab == "📊 Analytics":
                         column.metric(label, f"{value:.2f}")
 
                 st.subheader("📈 Equity Curve")
-                equity_fig = plot_equity_curve(enriched_df, drawdown=enriched_df["drawdown"])
-                st.pyplot(equity_fig, use_container_width=True)
+                equity_fig = plot_equity_curve(
+                    enriched_df, drawdown=enriched_df["drawdown"]
+                )
+                st.plotly_chart(equity_fig, use_container_width=True)
 
                 st.subheader("📉 Drawdown Curve")
                 drawdown_fig = plot_drawdown_curve(enriched_df)
-                st.pyplot(drawdown_fig, use_container_width=True)
+                st.plotly_chart(drawdown_fig, use_container_width=True)
 
                 st.subheader("📊 R-Multiple Distribution")
                 r_multiple_fig = plot_r_multiple_distribution(filtered_df)
-                st.pyplot(r_multiple_fig, use_container_width=True)
+                st.plotly_chart(r_multiple_fig, use_container_width=True)
 
                 st.subheader("📈 Expectancy")
-                expectancy_fig = plot_expectancy_bar(summary_metrics.get("Expectancy (R)", 0.0))
-                st.pyplot(expectancy_fig, use_container_width=False)
+                expectancy_fig = plot_expectancy_bar(
+                    summary_metrics.get("Expectancy (R)", 0.0)
+                )
+                st.plotly_chart(expectancy_fig, use_container_width=False)
 
                 with st.expander("Ver operaciones filtradas"):
                     preview_df = filtered_df.copy()
@@ -839,6 +972,65 @@ elif tab == "📊 Analytics":
                         "%Y-%m-%d %H:%M:%S"
                     )
                     st.dataframe(preview_df, use_container_width=True)
+
+                compare_labels = st.sidebar.multiselect(
+                    "Comparar hasta dos backtests",
+                    list(saved_lookup.keys()),
+                    help="Selecciona dos backtests guardados para comparar sus métricas.",
+                )
+                if len(compare_labels) > 2:
+                    st.sidebar.warning("Selecciona máximo dos backtests para el comparador.")
+                    compare_labels = compare_labels[:2]
+
+                if len(compare_labels) == 2:
+                    st.subheader("⚖️ Comparador de estrategias")
+
+                    comparison_rows = []
+                    for label in compare_labels:
+                        run_summary = saved_lookup.get(label)
+                        if not run_summary:
+                            continue
+                        trades_run, metrics_run = load_backtest_run(run_summary)
+                        trades_norm, _ = normalize_trade_dataframe(trades_run.copy())
+                        trades_norm["timestamp"] = pd.to_datetime(
+                            trades_norm.get("timestamp"), errors="coerce"
+                        )
+                        trades_norm = trades_norm.dropna(
+                            subset=["timestamp", "capital_final", "r_multiple"]
+                        )
+                        metrics_mapping: Mapping[str, float] | None = None
+                        if metrics_run is not None:
+                            if set(metrics_run.columns) >= {"metric", "value"}:
+                                metrics_mapping = dict(
+                                    zip(metrics_run["metric"], metrics_run["value"])
+                                )
+                            else:
+                                metrics_mapping = metrics_run.iloc[0].to_dict()
+
+                        metrics_values = compute_backtest_summary_metrics(
+                            trades_norm,
+                            metrics_mapping,
+                        )
+                        metadata = run_summary.metadata
+                        comparison_rows.append(
+                            {
+                                "Backtest": label,
+                                "Estrategia": metadata.get("strategy_label", "-"),
+                                "Símbolo": metadata.get("symbol", "-"),
+                                "Capital Inicial": metadata.get("capital_inicial", 0.0),
+                                "Capital Final": metadata.get("capital_final", 0.0),
+                                "Winrate %": metrics_values.get("Winrate %", 0.0),
+                                "Expectancy (R)": metrics_values.get("Expectancy (R)", 0.0),
+                                "Profit Factor": metrics_values.get("Profit Factor", 0.0),
+                                "Max Drawdown %": metrics_values.get("Max Drawdown %", 0.0),
+                            }
+                        )
+
+                    if comparison_rows:
+                        comparison_df = pd.DataFrame(comparison_rows)
+                        st.dataframe(
+                            comparison_df.set_index("Backtest"), use_container_width=True
+                        )
 
 elif tab == "⚙️ Configuración":
     st.title("⚙️ Configuración y ayuda")
