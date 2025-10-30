@@ -184,6 +184,8 @@ def run_backtest(
     sl_ratio: float = 1.0,
     tp_ratio: float = 2.0,
     logica: str = "AND",
+    *,
+    symbol: str | None = None,
 ) -> StrategyResult:
     """Ejecuta un backtest incorporando simulación monetaria y métricas completas."""
 
@@ -227,6 +229,7 @@ def run_backtest(
     df.loc[short_condition & ~long_condition, "signal"] = -1
 
     capital = float(capital_inicial)
+    symbol_value = symbol or ""
     trades: List[Dict[str, float | str | pd.Timestamp | None]] = []
 
     riesgo_fraccion = float(riesgo_por_trade) / 100
@@ -267,6 +270,7 @@ def run_backtest(
     entry_position_size = 0.0
     entry_stop_price: Optional[float] = None
     entry_take_price: Optional[float] = None
+    entry_stop_distance: float = 0.0
 
     def _compute_levels(price: float, side: int) -> tuple[float, float, float]:
         distance = price * base_fraction
@@ -281,7 +285,15 @@ def run_backtest(
         return stop_price, take_price, stop_distance
 
     def _open_position(signal_value: int, price_value: float, timestamp_value: pd.Timestamp) -> None:
-        nonlocal position, entry_price, entry_time, entry_capital, entry_risk_amount, entry_position_size, entry_stop_price, entry_take_price
+        nonlocal position
+        nonlocal entry_price
+        nonlocal entry_time
+        nonlocal entry_capital
+        nonlocal entry_risk_amount
+        nonlocal entry_position_size
+        nonlocal entry_stop_price
+        nonlocal entry_take_price
+        nonlocal entry_stop_distance
 
         if signal_value == 0:
             return
@@ -305,6 +317,7 @@ def run_backtest(
         entry_position_size = position_size_value
         entry_stop_price = stop_price_value
         entry_take_price = take_price_value
+        entry_stop_distance = stop_distance
 
     for _, row in df.iterrows():
         signal = int(row.get("signal", 0))
@@ -326,12 +339,19 @@ def run_backtest(
 
         trade_return = (price - entry_price) / entry_price * direction
         pnl_usd = direction * (price - entry_price) * position_size
-        risk_amount = entry_risk_amount
-        r_multiple = pnl_usd / risk_amount if risk_amount > 0 else np.nan
+        stop_distance = entry_stop_distance if entry_stop_distance > 0 else abs(entry_price - (entry_stop_price or entry_price))
+        risk_amount = position_size * stop_distance if stop_distance > 0 else entry_risk_amount
+        r_multiple = (
+            direction * (price - entry_price) / stop_distance
+            if stop_distance > 0
+            else np.nan
+        )
         capital += pnl_usd
         pnl_pct = pnl_usd / entry_capital if entry_capital else 0.0
         trades.append(
             {
+                "timestamp": entry_time,
+                "exit_timestamp": timestamp,
                 "entrada": entry_time,
                 "salida": timestamp,
                 "lado": "Largo" if direction == 1 else "Corto",
@@ -347,6 +367,10 @@ def run_backtest(
                 "capital_final": capital,
                 "stop_price": entry_stop_price,
                 "take_profit_price": entry_take_price,
+                "stop_distance": stop_distance,
+                "risk_pct": riesgo_por_trade,
+                "symbol": symbol_value,
+                "strategy": "+".join(strategy_list),
             }
         )
         equity_values.append(capital)
@@ -360,6 +384,7 @@ def run_backtest(
             entry_position_size = 0.0
             entry_stop_price = None
             entry_take_price = None
+            entry_stop_distance = 0.0
         else:
             position = 0
             entry_price = 0.0
@@ -368,6 +393,7 @@ def run_backtest(
             entry_position_size = 0.0
             entry_stop_price = None
             entry_take_price = None
+            entry_stop_distance = 0.0
             _open_position(signal, price, timestamp)
 
     if position != 0 and entry_price > 0:
@@ -378,12 +404,19 @@ def run_backtest(
         position_size = entry_position_size
         trade_return = (price - entry_price) / entry_price * direction
         pnl_usd = direction * (price - entry_price) * position_size
-        risk_amount = entry_risk_amount
-        r_multiple = pnl_usd / risk_amount if risk_amount > 0 else np.nan
+        stop_distance = entry_stop_distance if entry_stop_distance > 0 else abs(entry_price - (entry_stop_price or entry_price))
+        risk_amount = position_size * stop_distance if stop_distance > 0 else entry_risk_amount
+        r_multiple = (
+            direction * (price - entry_price) / stop_distance
+            if stop_distance > 0
+            else np.nan
+        )
         capital += pnl_usd
         pnl_pct = pnl_usd / entry_capital if entry_capital else 0.0
         trades.append(
             {
+                "timestamp": entry_time,
+                "exit_timestamp": timestamp,
                 "entrada": entry_time,
                 "salida": timestamp,
                 "lado": "Largo" if direction == 1 else "Corto",
@@ -399,6 +432,10 @@ def run_backtest(
                 "capital_final": capital,
                 "stop_price": entry_stop_price,
                 "take_profit_price": entry_take_price,
+                "stop_distance": stop_distance,
+                "risk_pct": riesgo_por_trade,
+                "symbol": symbol_value,
+                "strategy": "+".join(strategy_list),
             }
         )
         equity_values.append(capital)

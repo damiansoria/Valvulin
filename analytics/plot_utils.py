@@ -3,96 +3,174 @@ from __future__ import annotations
 
 from typing import Iterable, Optional
 
-import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
 
 
-def plot_equity_curve(df_trades: pd.DataFrame, *, drawdown: Optional[pd.Series] = None) -> plt.Figure:
-    """Create an equity curve figure.
+def _resolve_x_values(df_trades: pd.DataFrame) -> Iterable:
+    """Return the x-axis sequence for a trades dataframe."""
 
-    Parameters
-    ----------
-    df_trades:
-        DataFrame containing at least ``timestamp`` and ``capital_final`` columns.
-    drawdown:
-        Optional drawdown series to plot on a secondary axis.
-    """
+    if "timestamp" in df_trades.columns and df_trades["timestamp"].notna().any():
+        return df_trades["timestamp"]
+    return list(range(len(df_trades)))
 
-    figure, ax = plt.subplots(figsize=(10, 4))
-    if "timestamp" in df_trades.columns:
-        x_values: Iterable = df_trades["timestamp"]
+
+def plot_equity_curve(
+    df_trades: pd.DataFrame, *, drawdown: Optional[pd.Series] = None
+) -> go.Figure:
+    """Create an interactive equity curve highlighting trade outcomes."""
+
+    x_values = _resolve_x_values(df_trades)
+    figure = go.Figure()
+
+    figure.add_trace(
+        go.Scatter(
+            x=x_values,
+            y=df_trades["capital_final"],
+            mode="lines",
+            line=dict(color="#1f77b4", width=3),
+            name="Equity",
+            hovertemplate="Fecha: %{x}<br>Capital: $%{y:,.2f}<extra></extra>",
+        )
+    )
+
+    if not df_trades.empty and "r_multiple" in df_trades.columns:
+        winners = df_trades[df_trades["r_multiple"] >= 0]
+        losers = df_trades[df_trades["r_multiple"] < 0]
+        for subset, name, color in (
+            (winners, "Ganadora", "#2ecc71"),
+            (losers, "Perdedora", "#e74c3c"),
+        ):
+            if subset.empty:
+                continue
+            pnl_pct = subset.get("pnl", pd.Series(np.nan, index=subset.index)) * 100
+            r_mult = subset.get("r_multiple", pd.Series(np.nan, index=subset.index))
+            custom = np.column_stack(
+                [pnl_pct.fillna(0.0).astype(float), r_mult.fillna(0.0).astype(float)]
+            )
+            figure.add_trace(
+                go.Scatter(
+                    x=subset["timestamp"] if "timestamp" in subset.columns else subset.index,
+                    y=subset["capital_final"],
+                    mode="markers",
+                    marker=dict(size=10, color=color, symbol="circle"),
+                    name=f"{name} ({len(subset)})",
+                    customdata=custom,
+                    hovertemplate=(
+                        "Fecha: %{x}<br>Capital: $%{y:,.2f}<br>Retorno: %{customdata[0]:.2f}%"
+                        "<br>R múltiple: %{customdata[1]:.2f}<extra></extra>"
+                    ),
+                )
+            )
+
+    if drawdown is not None and not drawdown.empty:
+        figure.add_trace(
+            go.Scatter(
+                x=x_values,
+                y=drawdown,
+                mode="lines",
+                line=dict(color="#d62728", dash="dash"),
+                name="Drawdown %",
+                yaxis="y2",
+                hovertemplate="Fecha: %{x}<br>Drawdown: %{y:.2f}%<extra></extra>",
+            )
+        )
+
+        figure.update_layout(
+            yaxis=dict(title="Capital ($)"),
+            yaxis2=dict(title="Drawdown (%)", overlaying="y", side="right", showgrid=False),
+        )
     else:
-        x_values = range(len(df_trades))
+        figure.update_layout(yaxis=dict(title="Capital ($)"))
 
-    ax.plot(x_values, df_trades["capital_final"], label="Equity", linewidth=2, color="#1f77b4")
-    ax.set_title("Equity Curve")
-    ax.set_xlabel("Time" if "timestamp" in df_trades.columns else "Trade #")
-    ax.set_ylabel("Capital ($)")
-    ax.grid(alpha=0.3)
-
-    if drawdown is not None:
-        ax2 = ax.twinx()
-        ax2.plot(x_values, drawdown, label="Drawdown %", color="#d62728", linewidth=1.5, linestyle="--")
-        ax2.set_ylabel("Drawdown (%)")
-        lines, labels = ax.get_legend_handles_labels()
-        lines2, labels2 = ax2.get_legend_handles_labels()
-        ax.legend(lines + lines2, labels + labels2, loc="upper left")
-    else:
-        ax.legend(loc="upper left")
-
-    figure.tight_layout()
+    figure.update_layout(
+        title="Equity Curve",
+        hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+        margin=dict(l=40, r=40, t=60, b=40),
+    )
     return figure
 
 
-def plot_drawdown_curve(df_trades: pd.DataFrame) -> plt.Figure:
-    """Plot drawdown percentage over time."""
+def plot_drawdown_curve(df_trades: pd.DataFrame) -> go.Figure:
+    """Plot drawdown percentage over time with interactive hover."""
 
-    figure, ax = plt.subplots(figsize=(10, 4))
-    if "timestamp" in df_trades.columns:
-        x_values: Iterable = df_trades["timestamp"]
-    else:
-        x_values = range(len(df_trades))
-
-    ax.fill_between(x_values, df_trades["drawdown"], color="#ff7f0e", alpha=0.3)
-    ax.plot(x_values, df_trades["drawdown"], color="#ff7f0e", linewidth=2)
-    ax.set_title("Drawdown Curve")
-    ax.set_xlabel("Time" if "timestamp" in df_trades.columns else "Trade #")
-    ax.set_ylabel("Drawdown (%)")
-    ax.grid(alpha=0.3)
-    ax.axhline(0, color="black", linewidth=1)
-    figure.tight_layout()
+    x_values = _resolve_x_values(df_trades)
+    figure = go.Figure()
+    figure.add_trace(
+        go.Scatter(
+            x=x_values,
+            y=df_trades["drawdown"],
+            fill="tozeroy",
+            line=dict(color="#ff7f0e"),
+            name="Drawdown %",
+            hovertemplate="Fecha: %{x}<br>Drawdown: %{y:.2f}%<extra></extra>",
+        )
+    )
+    figure.update_layout(
+        title="Drawdown Curve",
+        xaxis_title="Time" if "timestamp" in df_trades.columns else "Trade #",
+        yaxis_title="Drawdown (%)",
+        hovermode="x unified",
+        margin=dict(l=40, r=40, t=60, b=40),
+    )
     return figure
 
 
-def plot_r_multiple_distribution(df_trades: pd.DataFrame, *, bins: int = 30) -> plt.Figure:
+def plot_r_multiple_distribution(
+    df_trades: pd.DataFrame, *, bins: int = 30
+) -> go.Figure:
     """Plot the distribution of R-multiples as a histogram."""
 
-    figure, ax = plt.subplots(figsize=(8, 4))
     r_values = df_trades["r_multiple"].dropna()
-    ax.hist(r_values, bins=bins, color="skyblue", edgecolor="black")
-    ax.axvline(0, color="red", linestyle="--", label="Break-even")
+    figure = go.Figure()
+    figure.add_trace(
+        go.Histogram(
+            x=r_values,
+            nbinsx=bins,
+            marker=dict(color="#6ab7ff"),
+            name="R",
+            hovertemplate="R: %{x:.2f}<br>Frecuencia: %{y}<extra></extra>",
+        )
+    )
+    figure.add_vline(x=0, line=dict(color="#d62728", dash="dash"), annotation_text="Break-even")
     if not r_values.empty:
-        ax.axvline(r_values.mean(), color="green", linestyle="--", label="Mean R")
-    ax.set_title("R-Multiple Distribution")
-    ax.set_xlabel("R-Multiple")
-    ax.set_ylabel("Frequency")
-    ax.legend(loc="upper right")
-    ax.grid(alpha=0.2)
-    figure.tight_layout()
+        figure.add_vline(
+            x=float(r_values.mean()),
+            line=dict(color="#2ecc71", dash="dot"),
+            annotation_text="Media",
+        )
+    figure.update_layout(
+        title="R-Multiple Distribution",
+        xaxis_title="R-Multiple",
+        yaxis_title="Frecuencia",
+        bargap=0.1,
+        margin=dict(l=40, r=40, t=60, b=40),
+    )
     return figure
 
 
-def plot_expectancy_bar(expectancy_value: float, *, ylim: tuple[float, float] = (-2.0, 2.0)) -> plt.Figure:
+def plot_expectancy_bar(
+    expectancy_value: float, *, ylim: tuple[float, float] = (-2.0, 2.0)
+) -> go.Figure:
     """Return a bar chart visualising expectancy."""
 
-    figure, ax = plt.subplots(figsize=(4, 4))
-    color = "green" if expectancy_value >= 0 else "red"
-    ax.bar(["Expectancy"], [expectancy_value], color=color)
-    ax.axhline(0, color="black", linewidth=1)
-    ax.set_ylim(*ylim)
-    ax.set_ylabel("Expectancy (R)")
-    ax.set_title("Expectancy Signal")
-    figure.tight_layout()
+    color = "#2ecc71" if expectancy_value >= 0 else "#e74c3c"
+    figure = go.Figure()
+    figure.add_trace(
+        go.Bar(
+            x=["Expectancy"],
+            y=[expectancy_value],
+            marker_color=color,
+            hovertemplate="Expectancy: %{y:.2f}R<extra></extra>",
+        )
+    )
+    figure.add_hline(y=0, line=dict(color="#333333", width=1))
+    figure.update_layout(
+        yaxis=dict(range=list(ylim), title="Expectancy (R)"),
+        margin=dict(l=40, r=40, t=60, b=40),
+    )
     return figure
 
 
