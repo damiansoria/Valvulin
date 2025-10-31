@@ -30,6 +30,7 @@ from analytics.plot_utils import (
 from valvulin.data.binance_public import BinancePublicDataFeed
 from modules.optimizer_advanced import PARAM_BOUNDS, run_optimizer
 from modules.backtesting import run_backtest
+from utils.pdf_report import generate_pdf_report
 
 
 # Configuración inicial de la página
@@ -568,7 +569,7 @@ elif tab == "🔁 Backtesting":
                 )
             else:
                 st.info(
-                    "Ejecutando optimización avanzada, esto puede tardar unos minutos..."
+                    "Ejecutando optimización avanzada... esto puede tardar unos minutos ⏳"
                 )
                 try:
                     best_payload, optimizer_df = run_optimizer(
@@ -585,14 +586,15 @@ elif tab == "🔁 Backtesting":
                 except Exception as exc:  # pragma: no cover - feedback para UI
                     st.error(f"No se pudo completar la optimización: {exc}")
                 else:
-                    st.success("Optimización completada ✅")
+                    st.success("✅ Optimización completada")
 
-                    best_params_df = pd.DataFrame([best_payload["best_params"]])
+                    best_params = best_payload["best_params"]
                     st.write("📈 Mejores parámetros encontrados:")
-                    st.dataframe(best_params_df, use_container_width=True)
-                    st.session_state["advanced_optimizer_best_params"] = best_payload[
-                        "best_params"
-                    ]
+                    st.dataframe(
+                        pd.DataFrame([best_params]),
+                        use_container_width=True,
+                    )
+                    st.session_state["advanced_optimizer_best_params"] = best_params
 
                     st.info("Ejecutando backtest con los parámetros óptimos...")
                     backtest_keys = [
@@ -607,26 +609,28 @@ elif tab == "🔁 Backtesting":
                         "symbol",
                     ]
                     backtest_kwargs = {key: best_payload[key] for key in backtest_keys}
-                    result_dict = run_backtest(**backtest_kwargs)
-                    st.success("Backtest completado ✅")
+                    backtest_result = run_backtest(**backtest_kwargs)
+                    st.success("✅ Backtest completado")
 
-                    st.write("📊 Métricas de rendimiento:")
-                    st.json(result_dict["metrics"])
+                    st.write("📊 Métricas del mejor backtest:")
+                    st.json(backtest_result["metrics"])
+
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    run_dir = Path("results") / "runs" / timestamp
+                    run_dir.mkdir(parents=True, exist_ok=True)
 
                     optimizer_path = Path("results/optimizer_results.csv")
                     best_backtest_path = Path("results/best_backtest.csv")
                     optimizer_path.parent.mkdir(parents=True, exist_ok=True)
                     optimizer_df.to_csv(optimizer_path, index=False)
-                    pd.DataFrame([result_dict["metrics"]]).to_csv(
+                    pd.DataFrame([backtest_result["metrics"]]).to_csv(
                         best_backtest_path, index=False
                     )
 
-                    timestamp = datetime.utcnow().strftime("%Y-%m-%d_%H-%M-%S")
-                    run_dir = Path("results/runs") / f"{timestamp}_optim_run"
-                    run_dir.mkdir(parents=True, exist_ok=True)
                     optimizer_df.to_csv(run_dir / "optimizer_results.csv", index=False)
-                    metrics_frame = pd.DataFrame([result_dict["metrics"]])
-                    metrics_frame.to_csv(run_dir / "best_backtest.csv", index=False)
+                    pd.DataFrame([backtest_result["metrics"]]).to_csv(
+                        run_dir / "best_backtest.csv", index=False
+                    )
 
                     config_payload = {
                         "optimizer": {
@@ -634,7 +638,7 @@ elif tab == "🔁 Backtesting":
                             "generations": 20,
                             "random_state": 42,
                             "strategies": list(estrategias_seleccionadas),
-                            "best_params": best_payload["best_params"],
+                            "best_params": best_params,
                             "summary": best_payload["optimizer_summary"],
                         },
                         "backtest": {
@@ -651,12 +655,13 @@ elif tab == "🔁 Backtesting":
                         encoding="utf-8",
                     )
 
-                    equity_df = result_dict["equity"].copy()
+                    equity_df = backtest_result["equity"].copy()
+                    trades_df = backtest_result["trades"].copy()
                     equity_df.to_csv(Path("results/equity_curve.csv"), index=False)
-                    trades_df = result_dict["trades"].copy()
                     trades_df.to_csv(Path("results/trades.csv"), index=False)
                     equity_df.to_csv(run_dir / "equity_curve.csv", index=False)
                     trades_df.to_csv(run_dir / "trades.csv", index=False)
+
                     equity_fig = px.line(
                         equity_df,
                         x=equity_df.columns[0],
@@ -684,6 +689,7 @@ elif tab == "🔁 Backtesting":
                         "expectancy_R",
                         "max_drawdown",
                         "profit_factor",
+                        "rr_effective",
                     ]
                     for column in numeric_cols:
                         if column in sorted_optimizer.columns:
@@ -702,22 +708,40 @@ elif tab == "🔁 Backtesting":
                     st.write("🏆 Top 10 parámetros optimizados")
                     st.dataframe(top10_df, use_container_width=True)
 
-                    if not sorted_optimizer.empty:
-                        plot_df = sorted_optimizer.head(200)
-                        if {"atr_mult_sl", "atr_mult_tp", "expectancy_R"}.issubset(
-                            plot_df.columns
-                        ):
-                            scatter3d = px.scatter_3d(
-                                plot_df,
-                                x="atr_mult_sl",
-                                y="atr_mult_tp",
-                                z="expectancy_R",
-                                color="max_drawdown",
-                                size="profit_factor",
-                                hover_data=["ema_fast", "ema_slow", "rsi_period"],
-                                title="Mapa 3D de Expectancy",
-                            )
-                            st.plotly_chart(scatter3d, use_container_width=True)
+                    optimizer_results_path = run_dir / "optimizer_results.csv"
+                    if optimizer_results_path.exists():
+                        plot_df = pd.read_csv(optimizer_results_path)
+                    else:
+                        plot_df = sorted_optimizer.copy()
+
+                    if not plot_df.empty and {
+                        "atr_mult_sl",
+                        "atr_mult_tp",
+                        "expectancy_R",
+                    }.issubset(plot_df.columns):
+                        for column in [
+                            "atr_mult_sl",
+                            "atr_mult_tp",
+                            "expectancy_R",
+                            "max_drawdown",
+                            "profit_factor",
+                        ]:
+                            plot_df[column] = pd.to_numeric(plot_df[column], errors="coerce")
+                        plot_df.dropna(
+                            subset=["atr_mult_sl", "atr_mult_tp", "expectancy_R"],
+                            inplace=True,
+                        )
+                        scatter3d = px.scatter_3d(
+                            plot_df,
+                            x="atr_mult_sl",
+                            y="atr_mult_tp",
+                            z="expectancy_R",
+                            color="max_drawdown",
+                            size="profit_factor",
+                            hover_data=["ema_fast", "ema_slow", "rsi_period"],
+                            title="Mapa 3D: Expectancy vs ATR Multipliers",
+                        )
+                        st.plotly_chart(scatter3d, use_container_width=True)
 
                     plt_module = None
                     try:
@@ -741,12 +765,17 @@ elif tab == "🔁 Backtesting":
                             except Exception:  # pragma: no cover - cleanup opcional
                                 pass
 
+                    pdf_path = generate_pdf_report(best_params, backtest_result, optimizer_df, timestamp)
+                    st.success("📄 Reporte PDF generado exitosamente")
+
                     st.session_state["auto_optimizer_run"] = {
-                        "metrics": result_dict["metrics"],
+                        "metrics": backtest_result["metrics"],
                         "optimizer_results": sorted_optimizer.to_dict("records"),
                         "equity": equity_df.to_dict("records"),
                         "trades": trades_df.to_dict("records"),
                         "run_dir": str(run_dir),
+                        "timestamp": timestamp,
+                        "pdf": pdf_path,
                     }
 
     stored = st.session_state.get("backtest_result")
@@ -1243,11 +1272,11 @@ elif tab == "📊 Analytics":
                     st.subheader("⚖️ Comparador de estrategias")
 
                     comparison_rows = []
-                for label in compare_labels:
-                    run_summary = saved_lookup.get(label)
-                    if not run_summary:
-                        continue
-                    trades_run, metrics_run = load_backtest_run(run_summary)
+                    for label in compare_labels:
+                        run_summary = saved_lookup.get(label)
+                        if not run_summary:
+                            continue
+                        trades_run, metrics_run = load_backtest_run(run_summary)
                         trades_norm, _ = normalize_trade_dataframe(trades_run.copy())
                         trades_norm["timestamp"] = pd.to_datetime(
                             trades_norm.get("timestamp"), errors="coerce"
@@ -1283,11 +1312,11 @@ elif tab == "📊 Analytics":
                             }
                         )
 
-                if comparison_rows:
-                    comparison_df = pd.DataFrame(comparison_rows)
-                    st.dataframe(
-                        comparison_df.set_index("Backtest"), use_container_width=True
-                    )
+                    if comparison_rows:
+                        comparison_df = pd.DataFrame(comparison_rows)
+                        st.dataframe(
+                            comparison_df.set_index("Backtest"), use_container_width=True
+                        )
 
     st.divider()
     optim_tab, = st.tabs(["🧠 Optimización Avanzada"])
