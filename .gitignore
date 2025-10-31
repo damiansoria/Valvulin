@@ -6,3 +6,4 @@ __pycache__/
 .venv/
 logs/
 results/
+!results/optimizer_advanced.csv

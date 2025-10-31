@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping
+from typing import Any, Dict, Iterable, List, Mapping, Tuple
 
 import numpy as np
 import pandas as pd
@@ -28,6 +28,7 @@ from analytics.plot_utils import (
     plot_r_multiple_distribution,
 )
 from valvulin.data.binance_public import BinancePublicDataFeed
+from modules.optimizer_advanced import AdvancedOptimizer, PARAM_BOUNDS, RESULTS_PATH
 
 
 # Configuración inicial de la página
@@ -350,6 +351,59 @@ if tab == "📥 Datos":
 elif tab == "🔁 Backtesting":
     st.title("🔁 Valvulin - Backtesting")
 
+    optimizer_defaults = st.session_state.get("advanced_optimizer_best_params")
+    if "backtest_sl_ratio" not in st.session_state:
+        if optimizer_defaults:
+            st.session_state["backtest_sl_ratio"] = float(
+                np.clip(
+                    optimizer_defaults.get("atr_mult_sl", 1.0),
+                    0.1,
+                    10.0,
+                )
+            )
+        else:
+            st.session_state["backtest_sl_ratio"] = 1.0
+    if "backtest_tp_ratio" not in st.session_state:
+        if optimizer_defaults:
+            st.session_state["backtest_tp_ratio"] = float(
+                np.clip(
+                    optimizer_defaults.get("atr_mult_tp", 2.0),
+                    0.1,
+                    15.0,
+                )
+            )
+        else:
+            st.session_state["backtest_tp_ratio"] = 2.0
+
+    if optimizer_defaults:
+        ema_fast_key = "sma_fast_SMA Crossover"
+        if ema_fast_key not in st.session_state:
+            st.session_state[ema_fast_key] = int(
+                np.clip(
+                    optimizer_defaults.get("ema_fast", 20),
+                    PARAM_BOUNDS["ema_fast"][0],
+                    PARAM_BOUNDS["ema_fast"][1],
+                )
+            )
+        ema_slow_key = "sma_slow_SMA Crossover"
+        if ema_slow_key not in st.session_state:
+            st.session_state[ema_slow_key] = int(
+                np.clip(
+                    optimizer_defaults.get("ema_slow", 50),
+                    PARAM_BOUNDS["ema_slow"][0],
+                    PARAM_BOUNDS["ema_slow"][1],
+                )
+            )
+        rsi_key = "rsi_period_RSI"
+        if rsi_key not in st.session_state:
+            st.session_state[rsi_key] = int(
+                np.clip(
+                    optimizer_defaults.get("rsi_period", 14),
+                    PARAM_BOUNDS["rsi_period"][0],
+                    PARAM_BOUNDS["rsi_period"][1],
+                )
+            )
+
     symbol = st.selectbox("Símbolo", ["BTCUSDT", "ETHUSDT"])
     interval = st.selectbox("Intervalo", ["1h", "4h", "1d"])
 
@@ -360,10 +414,18 @@ elif tab == "🔁 Backtesting":
         "🎯 Riesgo por operación (%)", min_value=0.1, value=1.0, step=0.1
     )
     sl_ratio = st.number_input(
-        "🛑 Stop Loss (R)", min_value=0.1, value=1.0, step=0.1
+        "🛑 Stop Loss (R)",
+        min_value=0.1,
+        value=float(st.session_state.get("backtest_sl_ratio", 1.0)),
+        step=0.1,
+        key="backtest_sl_ratio",
     )
     tp_ratio = st.number_input(
-        "🎯 Take Profit (R)", min_value=0.1, value=2.0, step=0.1
+        "🎯 Take Profit (R)",
+        min_value=0.1,
+        value=float(st.session_state.get("backtest_tp_ratio", 2.0)),
+        step=0.1,
+        key="backtest_tp_ratio",
     )
 
     estrategias_seleccionadas = st.multiselect(
@@ -986,11 +1048,11 @@ elif tab == "📊 Analytics":
                     st.subheader("⚖️ Comparador de estrategias")
 
                     comparison_rows = []
-                    for label in compare_labels:
-                        run_summary = saved_lookup.get(label)
-                        if not run_summary:
-                            continue
-                        trades_run, metrics_run = load_backtest_run(run_summary)
+                for label in compare_labels:
+                    run_summary = saved_lookup.get(label)
+                    if not run_summary:
+                        continue
+                    trades_run, metrics_run = load_backtest_run(run_summary)
                         trades_norm, _ = normalize_trade_dataframe(trades_run.copy())
                         trades_norm["timestamp"] = pd.to_datetime(
                             trades_norm.get("timestamp"), errors="coerce"
@@ -1026,11 +1088,284 @@ elif tab == "📊 Analytics":
                             }
                         )
 
-                    if comparison_rows:
-                        comparison_df = pd.DataFrame(comparison_rows)
-                        st.dataframe(
-                            comparison_df.set_index("Backtest"), use_container_width=True
+                if comparison_rows:
+                    comparison_df = pd.DataFrame(comparison_rows)
+                    st.dataframe(
+                        comparison_df.set_index("Backtest"), use_container_width=True
+                    )
+
+    st.divider()
+    st.subheader("🔍 Optimización Avanzada de Parámetros")
+    st.markdown(
+        "Experimenta con algoritmos genéticos o búsqueda bayesiana para encontrar "
+        "parámetros que maximicen la expectancy y controlen el drawdown."
+    )
+
+    history_dir = Path("data/history")
+    dataset_map: Dict[str, Tuple[Path, str, str]] = {}
+    if history_dir.exists():
+        file_map: Dict[Tuple[str, str], Path] = {}
+        for candidate in history_dir.glob("*.csv*"):
+            name = candidate.name
+            if not (name.endswith(".csv") or name.endswith(".csv.gz")):
+                continue
+            stem = name[:-4] if name.endswith(".csv") else name[:-7]
+            if "_" not in stem:
+                continue
+            symbol_part, interval_part = stem.split("_", 1)
+            key = (symbol_part, interval_part)
+            previous = file_map.get(key)
+            if previous is None or previous.suffix == ".gz":
+                file_map[key] = candidate
+        dataset_map = {
+            f"{symbol} · {interval}": (path, symbol, interval)
+            for (symbol, interval), path in sorted(file_map.items(), key=lambda item: item[0])
+        }
+
+    if not dataset_map:
+        st.info(
+            "No se encontraron datasets en `data/history`. Descarga datos en la pestaña 📥 Datos para comenzar."
+        )
+    else:
+        dataset_label = st.selectbox(
+            "Dataset de datos históricos",
+            options=list(dataset_map.keys()),
+            key="advanced_optimizer_dataset",
+        )
+        selected_path, selected_symbol, selected_interval = dataset_map[dataset_label]
+
+        col_a, col_b, col_c = st.columns(3)
+        optimizer_capital = col_a.number_input(
+            "Capital para optimización (USDT)",
+            min_value=100.0,
+            value=float(st.session_state.get("optimizer_capital", 1000.0)),
+            step=100.0,
+            key="optimizer_capital",
+        )
+        optimizer_risk = col_b.number_input(
+            "Riesgo por operación (%)",
+            min_value=0.1,
+            max_value=5.0,
+            value=float(st.session_state.get("optimizer_risk", 1.0)),
+            step=0.1,
+            key="optimizer_risk",
+        )
+        optimizer_logic = col_c.selectbox(
+            "Lógica de señales",
+            options=["AND", "OR"],
+            index=0,
+            key="optimizer_logic",
+        )
+
+        with st.expander("⚙️ Configuración avanzada de búsqueda"):
+            population_size = st.number_input(
+                "Población (GA)",
+                min_value=10,
+                max_value=200,
+                value=int(st.session_state.get("optimizer_population", 30)),
+                step=1,
+                key="optimizer_population",
+            )
+            generations = st.number_input(
+                "Generaciones (GA)",
+                min_value=5,
+                max_value=100,
+                value=int(st.session_state.get("optimizer_generations", 20)),
+                step=1,
+                key="optimizer_generations",
+            )
+            n_calls = st.number_input(
+                "Iteraciones (BO)",
+                min_value=10,
+                max_value=200,
+                value=int(st.session_state.get("optimizer_calls", 60)),
+                step=5,
+                key="optimizer_calls",
+            )
+
+        mode_choice = st.radio(
+            "Método de optimización",
+            options=["🧬 Genético", "📈 Bayesiano"],
+            horizontal=True,
+            key="optimizer_mode",
+        )
+        st.caption(
+            "Rangos de búsqueda: "
+            + ", ".join(
+                f"{name} = [{low}, {high}]" for name, (low, high) in PARAM_BOUNDS.items()
+            )
+        )
+
+        def _load_price_history(path: Path) -> pd.DataFrame:
+            df_loaded = pd.read_csv(path)
+            numeric_columns = [
+                col for col in ["open", "high", "low", "close", "volume"] if col in df_loaded.columns
+            ]
+            for column in numeric_columns:
+                df_loaded[column] = pd.to_numeric(df_loaded[column], errors="coerce")
+            df_loaded.dropna(subset=["close"], inplace=True)
+            return df_loaded
+
+        optimize_clicked = st.button("Optimizar parámetros (Avanzado)")
+        if optimize_clicked:
+            try:
+                dataset_df = _load_price_history(selected_path)
+            except Exception as exc:  # pragma: no cover - defensivo para la UI
+                st.error(f"No se pudo cargar el dataset seleccionado: {exc}")
+            else:
+                try:
+                    optimizer = AdvancedOptimizer(
+                        dataset_df,
+                        strategies=("SMA Crossover", "RSI"),
+                        capital_inicial=optimizer_capital,
+                        riesgo_por_trade=optimizer_risk,
+                        logica=optimizer_logic,
+                        symbol=selected_symbol,
+                    )
+                    with st.spinner("Ejecutando optimización avanzada..."):
+                        if mode_choice.startswith("🧬"):
+                            results_df = optimizer.optimize(
+                                "genetico",
+                                population_size=int(population_size),
+                                generations=int(generations),
+                                random_state=42,
+                            )
+                        else:
+                            results_df = optimizer.optimize(
+                                "bayesiano",
+                                n_calls=int(n_calls),
+                                random_state=42,
+                            )
+                except Exception as exc:  # pragma: no cover - feedback en UI
+                    st.error(f"No se pudo completar la optimización: {exc}")
+                else:
+                    sorted_df = results_df.sort_values(
+                        by=["expectancy_R", "max_drawdown"], ascending=[False, True]
+                    )
+                    st.session_state["advanced_optimizer_results"] = sorted_df.to_dict("records")
+                    if not sorted_df.empty:
+                        top_row = sorted_df.iloc[0]
+                        st.session_state["advanced_optimizer_best_params"] = {
+                            name: float(top_row[name]) for name in PARAM_BOUNDS
+                        }
+                    st.session_state["advanced_optimizer_metadata"] = {
+                        "symbol": selected_symbol,
+                        "interval": selected_interval,
+                        "mode": "Genético" if mode_choice.startswith("🧬") else "Bayesiano",
+                        "path": str(selected_path),
+                    }
+                    st.success("Optimización completada. Los resultados se han guardado en results/optimizer_advanced.csv.")
+
+        stored_records = st.session_state.get("advanced_optimizer_results")
+        if stored_records:
+            results_df = pd.DataFrame(stored_records)
+        elif RESULTS_PATH.exists():
+            try:
+                results_df = pd.read_csv(RESULTS_PATH)
+            except Exception:  # pragma: no cover - lectura defensiva
+                results_df = pd.DataFrame()
+        else:
+            results_df = pd.DataFrame()
+
+        if results_df.empty:
+            st.info("Ejecuta la optimización para visualizar los resultados.")
+        else:
+            numeric_cols = [
+                "ema_fast",
+                "ema_slow",
+                "rsi_period",
+                "atr_mult_sl",
+                "atr_mult_tp",
+                "expectancy_R",
+                "max_drawdown",
+                "profit_factor",
+                "rr_effective",
+                "fitness",
+            ]
+            for column in numeric_cols:
+                if column in results_df.columns:
+                    results_df[column] = pd.to_numeric(results_df[column], errors="coerce")
+            results_df.dropna(subset=["expectancy_R", "max_drawdown"], inplace=True)
+            results_df.sort_values(
+                by=["expectancy_R", "max_drawdown"], ascending=[False, True], inplace=True
+            )
+            top_results = results_df.head(10).reset_index(drop=True)
+            st.write("### Top 10 resultados optimizados")
+            st.dataframe(top_results, use_container_width=True)
+
+            best_params = None
+            if not top_results.empty:
+                top_row = top_results.iloc[0]
+                best_params = {name: float(top_row[name]) for name in PARAM_BOUNDS}
+                st.session_state["advanced_optimizer_best_params"] = best_params
+
+            if RESULTS_PATH.exists():
+                try:
+                    plot_df = pd.read_csv(RESULTS_PATH)
+                except Exception:  # pragma: no cover - fallback
+                    plot_df = top_results.copy()
+            else:
+                plot_df = top_results.copy()
+
+            if not plot_df.empty:
+                plot_df = plot_df.copy()
+                for column in [
+                    "atr_mult_sl",
+                    "atr_mult_tp",
+                    "expectancy_R",
+                    "max_drawdown",
+                    "profit_factor",
+                ]:
+                    plot_df[column] = pd.to_numeric(plot_df[column], errors="coerce")
+                plot_df.dropna(
+                    subset=["atr_mult_sl", "atr_mult_tp", "expectancy_R"], inplace=True
+                )
+                if not plot_df.empty:
+                    fig = px.scatter_3d(
+                        plot_df,
+                        x="atr_mult_sl",
+                        y="atr_mult_tp",
+                        z="expectancy_R",
+                        color="max_drawdown",
+                        size="profit_factor",
+                        hover_data=["ema_fast", "ema_slow", "rsi_period", "mark_as_best"],
+                        title="Mapa 3D de Expectancy vs ATR Multipliers",
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("Aún no hay datos suficientes para generar la visualización 3D.")
+
+            if best_params:
+                if st.button("Aplicar mejores parámetros al backtest"):
+                    st.session_state["advanced_optimizer_best_params"] = best_params
+                    st.session_state["backtest_sl_ratio"] = float(best_params["atr_mult_sl"])
+                    st.session_state["backtest_tp_ratio"] = float(best_params["atr_mult_tp"])
+                    st.session_state["sma_fast_SMA Crossover"] = int(
+                        np.clip(
+                            best_params["ema_fast"],
+                            PARAM_BOUNDS["ema_fast"][0],
+                            PARAM_BOUNDS["ema_fast"][1],
                         )
+                    )
+                    st.session_state["sma_slow_SMA Crossover"] = int(
+                        np.clip(
+                            best_params["ema_slow"],
+                            PARAM_BOUNDS["ema_slow"][0],
+                            PARAM_BOUNDS["ema_slow"][1],
+                        )
+                    )
+                    st.session_state["rsi_period_RSI"] = int(
+                        np.clip(
+                            best_params["rsi_period"],
+                            PARAM_BOUNDS["rsi_period"][0],
+                            PARAM_BOUNDS["rsi_period"][1],
+                        )
+                    )
+                    st.success(
+                        "Parámetros aplicados. Ve a la pestaña 🔁 Backtesting para utilizarlos en un nuevo backtest."
+                    )
+            else:
+                st.info("Ejecuta una optimización para habilitar la aplicación de parámetros al backtest.")
 
 elif tab == "⚙️ Configuración":
     st.title("⚙️ Configuración y ayuda")
