@@ -13,3 +13,5 @@ mplfinance>=0.12.10b0  # Advanced candlestick rendering
 plotly>=5.18,<6.0  # Interactive charts and Dash integration
 bokeh>=3.3,<4.0  # Browser-based interactive charts
 dash>=2.14,<3.0  # Local web dashboard for Plotly figures
+deap>=1.3.3  # Genetic algorithms for optimización avanzada
+scikit-optimize>=0.9.0  # Bayesian optimisation utilities
