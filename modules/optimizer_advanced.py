@@ -376,4 +376,92 @@ class AdvancedOptimizer:
         )
 
 
-__all__ = ["AdvancedOptimizer", "PARAM_BOUNDS", "RESULTS_PATH"]
+def run_optimizer(
+    *,
+    data: pd.DataFrame,
+    strategies: Sequence[str] | None = None,
+    capital_inicial: float = 1_000.0,
+    riesgo_por_trade: float = 1.0,
+    logica: str = "AND",
+    symbol: str | None = None,
+    mode: str = "bayesiano",
+    generations: int = 20,
+    population_size: int = 30,
+    elite_ratio: float = 0.2,
+    n_calls: int | None = None,
+    random_state: int = 42,
+) -> Tuple[Dict[str, Any], pd.DataFrame]:
+    """Execute an optimisation run and return the best configuration and the results."""
+
+    if data is None or data.empty:
+        raise ValueError("Se requiere un DataFrame con datos para ejecutar la optimización.")
+
+    strategies = tuple(strategies) if strategies else ("SMA Crossover", "RSI")
+    optimizer = AdvancedOptimizer(
+        data,
+        strategies=strategies,
+        capital_inicial=capital_inicial,
+        riesgo_por_trade=riesgo_por_trade,
+        logica=logica,
+        symbol=symbol,
+    )
+
+    normalized_mode = mode.lower()
+    effective_n_calls = n_calls if n_calls is not None else max(generations, 20)
+
+    results_df = optimizer.optimize(
+        normalized_mode,
+        generations=generations,
+        population_size=population_size,
+        elite_ratio=elite_ratio,
+        n_calls=effective_n_calls,
+        random_state=random_state,
+    )
+
+    if results_df.empty:
+        raise ValueError("La optimización no devolvió resultados válidos.")
+
+    def _sorter(frame: pd.DataFrame) -> pd.DataFrame:
+        return frame.sort_values(
+            by=["expectancy_R", "profit_factor", "max_drawdown"],
+            ascending=[False, False, True],
+        )
+
+    meets_mask = (results_df["expectancy_R"] >= 0.20) & (results_df["max_drawdown"] <= 10.0)
+    preferred = results_df.loc[meets_mask]
+    ranked = _sorter(preferred if not preferred.empty else results_df)
+    best_row = ranked.iloc[0]
+
+    best_params = {name: float(best_row[name]) for name in PARAM_BOUNDS}
+    strategy_params = {
+        "SMA Crossover": {
+            "fast": float(int(round(best_params["ema_fast"]))),
+            "slow": float(int(round(best_params["ema_slow"]))),
+        },
+        "RSI": {"period": float(int(round(best_params["rsi_period"])))},
+    }
+
+    payload: Dict[str, Any] = {
+        "data": data.copy(),
+        "strategies": strategies,
+        "params": strategy_params,
+        "capital_inicial": float(capital_inicial),
+        "riesgo_por_trade": float(riesgo_por_trade),
+        "sl_ratio": float(best_params["atr_mult_sl"]),
+        "tp_ratio": float(best_params["atr_mult_tp"]),
+        "logica": logica,
+        "symbol": symbol,
+        "best_params": best_params,
+        "optimizer_summary": {
+            "expectancy_R": float(best_row["expectancy_R"]),
+            "max_drawdown": float(best_row["max_drawdown"]),
+            "profit_factor": float(best_row["profit_factor"]),
+            "rr_effective": float(best_row.get("rr_effective", np.nan)),
+            "method": best_row.get("method", normalized_mode.title()),
+        },
+    }
+
+    return payload, results_df
+
+
+__all__ = ["AdvancedOptimizer", "PARAM_BOUNDS", "RESULTS_PATH", "run_optimizer"]
