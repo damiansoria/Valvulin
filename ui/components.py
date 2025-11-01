@@ -66,7 +66,7 @@ def _style_dataframe(df: pd.DataFrame) -> pd.io.formats.style.Styler:
             reference_col = highlight_columns[0]
             value = row.get(reference_col)
         else:
-            numeric_values = row.select_dtypes(include=[np.number])
+            numeric_values = pd.to_numeric(row, errors="coerce").dropna()
             value = numeric_values.iloc[0] if not numeric_values.empty else None
 
         is_positive = False
