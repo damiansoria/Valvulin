@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import plotly.io as pio
 import streamlit as st
 import yaml
 
@@ -31,10 +32,25 @@ from valvulin.data.binance_public import BinancePublicDataFeed
 from modules.optimizer_advanced import PARAM_BOUNDS, run_optimizer
 from modules.backtesting import run_backtest
 from utils.pdf_report import generate_pdf_report
+from ui.components import chart_block, dataframe_block, trade_table
+from ui.layout import card, divider, metric_columns, section_header
+from ui.theme import (
+    ACCENT,
+    apply_theme,
+    DRAWDOWN_COLOR,
+    EQUITY_COLOR,
+)
 
 
-# Configuración inicial de la página
-st.set_page_config(page_title="Valvulin Trading Bot", layout="wide")
+# Configuración inicial de la página y tema visual
+st.set_page_config(
+    page_title="Valvulin Pro Dashboard",
+    page_icon="📊",
+    layout="wide",
+)
+template_name = apply_theme()
+px.defaults.template = template_name
+pio.templates.default = template_name
 
 # Inicializar el estado para los registros de log y descargas recientes
 if "logs" not in st.session_state:
@@ -49,7 +65,11 @@ tab = st.sidebar.radio(
 )
 
 if tab == "📥 Datos":
-    st.title("📈 Valvulin - Bot de Trading y Backtesting")
+    section_header(
+        "📥 Gestión de datos históricos",
+        "Descarga y sincroniza tus fuentes de mercado para el backtesting.",
+        level=2,
+    )
     st.sidebar.header("⚙️ Configuración de datos")
     user_symbol = st.sidebar.text_input("Símbolo principal", value="BTCUSDT").upper().strip()
     predefined_symbols: List[str] = [
@@ -107,7 +127,11 @@ if tab == "📥 Datos":
         max_limit=int(limit_value),
     )
 
-    st.write("### Descargar o actualizar datos históricos")
+    section_header(
+        "💾 Descargar o actualizar datos históricos",
+        "Obtén datos públicos de Binance listos para tus estrategias.",
+        level=3,
+    )
     st.info("Puedes usar esta herramienta para descargar datos públicos de Binance sin necesidad de API Key.")
 
     config_path = Path("config.yaml")
@@ -132,8 +156,11 @@ if tab == "📥 Datos":
                 }
             )
         if feed_rows:
-            st.write("#### Feeds configurados en config.yaml")
-            st.table(pd.DataFrame(feed_rows))
+            with card(
+                "🗃️ Feeds configurados en config.yaml",
+                "Listado de fuentes disponibles actualmente en tu archivo de configuración.",
+            ):
+                dataframe_block(pd.DataFrame(feed_rows))
 
     status_container = st.container()
     now_utc = datetime.now(timezone.utc)
@@ -589,11 +616,11 @@ elif tab == "🔁 Backtesting":
                     st.success("✅ Optimización completada")
 
                     best_params = best_payload["best_params"]
-                    st.write("📈 Mejores parámetros encontrados:")
-                    st.dataframe(
-                        pd.DataFrame([best_params]),
-                        use_container_width=True,
-                    )
+                    with card(
+                        "📈 Mejores parámetros encontrados",
+                        "Parámetros óptimos sugeridos por la optimización híbrida.",
+                    ):
+                        dataframe_block(pd.DataFrame([best_params]))
                     st.session_state["advanced_optimizer_best_params"] = best_params
 
                     st.info("Ejecutando backtest con los parámetros óptimos...")
@@ -612,8 +639,11 @@ elif tab == "🔁 Backtesting":
                     backtest_result = run_backtest(**backtest_kwargs)
                     st.success("✅ Backtest completado")
 
-                    st.write("📊 Métricas del mejor backtest:")
-                    st.json(backtest_result["metrics"])
+                    with card(
+                        "📊 Métricas del mejor backtest",
+                        "Resultados clave obtenidos con los parámetros óptimos.",
+                    ):
+                        st.json(backtest_result["metrics"])
 
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                     run_dir = Path("results") / "runs" / timestamp
@@ -666,18 +696,35 @@ elif tab == "🔁 Backtesting":
                         equity_df,
                         x=equity_df.columns[0],
                         y="equity",
-                        title="Curva de equity",
                     )
-                    st.plotly_chart(equity_fig, use_container_width=True)
+                    equity_fig.update_layout(
+                        template=template_name,
+                        xaxis_title="Fecha",
+                        yaxis_title="Equity acumulado",
+                    )
+                    equity_fig.update_traces(line=dict(color=EQUITY_COLOR, width=3))
+                    chart_block(
+                        "💹 Curva de Equity",
+                        "Evolución del capital tras aplicar los parámetros optimizados.",
+                        equity_fig,
+                    )
 
                     if "r_multiple" in trades_df.columns:
                         hist_fig = px.histogram(
                             trades_df,
                             x="r_multiple",
                             nbins=25,
-                            title="Distribución de R-múltiplos",
                         )
-                        st.plotly_chart(hist_fig, use_container_width=True)
+                        hist_fig.update_layout(
+                            template=template_name,
+                            xaxis_title="R-Múltiplo",
+                            yaxis_title="Frecuencia",
+                        )
+                        chart_block(
+                            "🔍 Distribución de R-Múltiplos",
+                            "Resultados de cada operación expresados en múltiplos de riesgo (R).",
+                            hist_fig,
+                        )
 
                     sorted_optimizer = optimizer_df.copy()
                     numeric_cols = [
@@ -705,8 +752,11 @@ elif tab == "🔁 Backtesting":
                         inplace=True,
                     )
                     top10_df = sorted_optimizer.head(10)
-                    st.write("🏆 Top 10 parámetros optimizados")
-                    st.dataframe(top10_df, use_container_width=True)
+                    with card(
+                        "🏆 Top 10 parámetros optimizados",
+                        "Configuraciones con mayor expectancy y menor drawdown.",
+                    ):
+                        dataframe_block(top10_df)
 
                     optimizer_results_path = run_dir / "optimizer_results.csv"
                     if optimizer_results_path.exists():
@@ -739,9 +789,22 @@ elif tab == "🔁 Backtesting":
                             color="max_drawdown",
                             size="profit_factor",
                             hover_data=["ema_fast", "ema_slow", "rsi_period"],
-                            title="Mapa 3D: Expectancy vs ATR Multipliers",
                         )
-                        st.plotly_chart(scatter3d, use_container_width=True)
+                        scatter3d.update_layout(
+                            template=template_name,
+                            scene=dict(
+                                xaxis_title="ATR SL",
+                                yaxis_title="ATR TP",
+                                zaxis_title="Expectancy (R)",
+                                bgcolor="rgba(0,0,0,0)",
+                            ),
+                            margin=dict(l=0, r=0, t=40, b=0),
+                        )
+                        chart_block(
+                            "🧠 Mapa 3D de Expectancy",
+                            "Representa la rentabilidad esperada según combinaciones de ATR SL y TP.",
+                            scatter3d,
+                        )
 
                     plt_module = None
                     try:
@@ -784,9 +847,15 @@ elif tab == "🔁 Backtesting":
         trades_df = result.trades.copy()
         equity_curve = result.equity_curve
 
-        st.subheader("📈 Métricas avanzadas")
+        section_header(
+            "📊 Métricas Principales",
+            "Resumen cuantitativo del backtest ejecutado en esta sesión.",
+            level=2,
+        )
         metrics_df = pd.DataFrame([result.metrics]).T.rename(columns={0: "Valor"})
-        st.dataframe(metrics_df, use_container_width=True)
+        metrics_df.index.name = "Métrica"
+        metrics_df_reset = metrics_df.reset_index()
+        dataframe_block(metrics_df_reset)
 
         chart_df = result.data.copy()
         fig = go.Figure(
@@ -862,19 +931,48 @@ elif tab == "🔁 Backtesting":
                 )
             )
 
-        fig.update_layout(title="📉 Señales sobre el precio", legend=dict(orientation="h", yanchor="bottom", y=1.02))
-        st.plotly_chart(fig, use_container_width=True)
+        fig.update_layout(
+            template=template_name,
+            title="",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02),
+            xaxis_title="Fecha",
+            yaxis_title="Precio",
+        )
+        chart_block(
+            "📉 Señales sobre el precio",
+            "Visualiza las entradas y salidas de la estrategia sobre el gráfico de velas.",
+            fig,
+        )
 
-        st.subheader("📈 Curva de Patrimonio")
-        st.line_chart(equity_curve, height=300)
+        equity_plot_df = equity_curve.reset_index()
+        equity_plot_df.columns = ["timestamp", "equity"]
+        equity_fig = px.line(equity_plot_df, x="timestamp", y="equity")
+        equity_fig.update_traces(line=dict(color=EQUITY_COLOR, width=3))
+        equity_fig.update_layout(xaxis_title="Fecha", yaxis_title="Equity acumulado")
+        chart_block(
+            "💹 Curva de Patrimonio",
+            "Evolución del capital acumulado tras cada operación registrada.",
+            equity_fig,
+        )
 
-        st.subheader("📉 Curva de Drawdown")
         drawdown_chart = result.drawdown * 100 if hasattr(result, "drawdown") else None
         if drawdown_chart is not None:
-            st.line_chart(drawdown_chart.rename("Drawdown %"), height=200)
+            drawdown_plot_df = drawdown_chart.reset_index()
+            drawdown_plot_df.columns = ["timestamp", "drawdown"]
+            drawdown_fig = px.line(drawdown_plot_df, x="timestamp", y="drawdown")
+            drawdown_fig.update_layout(
+                template=template_name,
+                xaxis_title="Fecha",
+                yaxis_title="Drawdown %",
+            )
+            drawdown_fig.update_traces(line=dict(color=DRAWDOWN_COLOR, width=3))
+            chart_block(
+                "📉 Curva de Drawdown",
+                "Magnitud de las caídas temporales del capital frente a sus máximos previos.",
+                drawdown_fig,
+            )
 
         if not trades_df.empty:
-            st.subheader("📊 Distribución de Retornos")
             hist_df = trades_df.copy()
             hist_df["resultado"] = np.where(hist_df["pnl"] > 0, "Ganadora", "Perdedora")
             fig_hist = px.histogram(
@@ -885,18 +983,36 @@ elif tab == "🔁 Backtesting":
                 color_discrete_map={"Ganadora": "#2ecc71", "Perdedora": "#e74c3c"},
                 labels={"pnl": "Retorno por operación"},
             )
-            fig_hist.update_layout(bargap=0.15)
-            st.plotly_chart(fig_hist, use_container_width=True)
+            fig_hist.update_layout(
+                template=template_name,
+                bargap=0.15,
+                xaxis_title="Retorno por operación",
+                yaxis_title="Frecuencia",
+            )
+            chart_block(
+                "🔍 Distribución de Retornos",
+                "Número de operaciones agrupadas por su resultado porcentual.",
+                fig_hist,
+            )
 
-        st.subheader("🧾 Operaciones")
-        trades_display = trades_df.copy()
-        if not trades_display.empty:
-            trades_display["pnl_%"] = (trades_display["pnl"] * 100).round(4)
-            trades_display["entrada"] = trades_display["entrada"].dt.strftime("%Y-%m-%d %H:%M")
-            trades_display["salida"] = trades_display["salida"].dt.strftime("%Y-%m-%d %H:%M")
-            st.dataframe(trades_display, use_container_width=True)
-        else:
-            st.info("No se generaron operaciones con la configuración actual.")
+        with card("🧾 Operaciones", "Lista de operaciones ejecutadas con detalle de entradas y salidas."):
+            trades_display = trade_table(trades_df)
+            if trades_display.empty:
+                st.info("No se generaron operaciones con la configuración actual.")
+            else:
+                dataframe_block(trades_display)
+
+        optimizer_meta = stored.get("metadata", {}).get("optimizer", {}) if stored else {}
+        optimizer_name = optimizer_meta.get("mode", "Manual")
+        with card("ℹ️ Acerca de esta prueba", None):
+            st.caption(
+                f"""
+Estrategia combinada: {', '.join(stored.get('strategies', [])) or 'No especificada'}  
+Símbolo: **{stored.get('symbol', 'N/D')}** · Intervalo: **{stored.get('interval', 'N/D')}**  
+Optimizador utilizado: **{optimizer_name}**  
+Capital inicial: **{stored.get('capital_inicial', 'N/D')} USDT** · Riesgo por operación: **{stored.get('riesgo', 'N/D')}%**
+"""
+            )
 
         export_col1, export_col2 = st.columns([0.2, 0.8])
         with export_col1:
@@ -1211,8 +1327,13 @@ elif tab == "📊 Analytics":
                     summary_payload,
                 )
 
-                st.subheader("🧾 Summary Metrics")
-                metric_labels = [
+                section_header(
+                    "📊 Métricas Principales",
+                    "Resumen de rendimiento acumulado del backtest actual.",
+                    level=2,
+                )
+                metric_payload = []
+                for label in [
                     "Winrate %",
                     "Net Profit %",
                     "Expectancy (R)",
@@ -1222,42 +1343,84 @@ elif tab == "📊 Analytics":
                     "Breakeven Winrate %",
                     "Max Drawdown %",
                     "Profit Factor",
-                ]
-                metric_columns = st.columns(3)
-                for idx, label in enumerate(metric_labels):
-                    column = metric_columns[idx % 3]
+                ]:
                     value = summary_metrics.get(label, 0.0)
                     if label.endswith("%"):
-                        column.metric(label, f"{value:.2f}%")
+                        formatted = f"{value:.2f}%"
                     else:
-                        column.metric(label, f"{value:.2f}")
+                        formatted = f"{value:.2f}"
+                    metric_payload.append((label, formatted))
+                metric_columns(metric_payload)
 
-                st.subheader("📈 Equity Curve")
+                divider()
+
                 equity_fig = plot_equity_curve(
                     enriched_df, drawdown=enriched_df["drawdown"]
                 )
-                st.plotly_chart(equity_fig, use_container_width=True)
+                equity_fig.update_layout(
+                    template=template_name,
+                    title="",  # handled by chart card title
+                    xaxis_title="Fecha",
+                    yaxis_title="Equity acumulado",
+                )
+                equity_fig.for_each_trace(
+                    lambda trace: trace.update(line=dict(color=EQUITY_COLOR, width=3))
+                )
+                chart_block(
+                    "💹 Curva de Equity",
+                    "Muestra la evolución del capital acumulado a lo largo del tiempo.",
+                    equity_fig,
+                )
 
-                st.subheader("📉 Drawdown Curve")
                 drawdown_fig = plot_drawdown_curve(enriched_df)
-                st.plotly_chart(drawdown_fig, use_container_width=True)
+                drawdown_fig.update_layout(
+                    template=template_name,
+                    title="",
+                    xaxis_title="Fecha",
+                    yaxis_title="Drawdown %",
+                )
+                drawdown_fig.for_each_trace(
+                    lambda trace: trace.update(line=dict(color=DRAWDOWN_COLOR, width=3))
+                )
+                chart_block(
+                    "📉 Curva de Drawdown",
+                    "Muestra la pérdida máxima desde el último pico del capital.",
+                    drawdown_fig,
+                )
 
-                st.subheader("📊 R-Multiple Distribution")
                 r_multiple_fig = plot_r_multiple_distribution(filtered_df)
-                st.plotly_chart(r_multiple_fig, use_container_width=True)
+                r_multiple_fig.update_layout(
+                    template=template_name,
+                    title="",
+                    xaxis_title="R-Múltiplo",
+                    yaxis_title="Frecuencia",
+                )
+                chart_block(
+                    "🔍 Distribución de R-Múltiplos",
+                    "Cuántas operaciones alcanzaron distintos niveles de beneficio o pérdida.",
+                    r_multiple_fig,
+                )
 
-                st.subheader("📈 Expectancy")
                 expectancy_fig = plot_expectancy_bar(
                     summary_metrics.get("Expectancy (R)", 0.0)
                 )
-                st.plotly_chart(expectancy_fig, use_container_width=False)
+                expectancy_fig.update_layout(template=template_name, title="")
+                expectancy_fig.update_traces(marker_color=ACCENT)
+                chart_block(
+                    "🧠 Expectancy",
+                    "Rentabilidad esperada por trade expresada en múltiplos de riesgo (R).",
+                    expectancy_fig,
+                )
 
-                with st.expander("Ver operaciones filtradas"):
+                with card(
+                    "🗂️ Operaciones Filtradas",
+                    "Detalle de cada trade aplicado a los filtros actuales.",
+                ):
                     preview_df = filtered_df.copy()
                     preview_df["timestamp"] = preview_df["timestamp"].dt.strftime(
                         "%Y-%m-%d %H:%M:%S"
                     )
-                    st.dataframe(preview_df, use_container_width=True)
+                    dataframe_block(preview_df)
 
                 compare_labels = st.sidebar.multiselect(
                     "Comparar hasta dos backtests",
@@ -1313,18 +1476,20 @@ elif tab == "📊 Analytics":
                         )
 
                     if comparison_rows:
-                        comparison_df = pd.DataFrame(comparison_rows)
-                        st.dataframe(
-                            comparison_df.set_index("Backtest"), use_container_width=True
-                        )
+                        comparison_df = pd.DataFrame(comparison_rows).set_index("Backtest")
+                        with card(
+                            "⚖️ Comparador de estrategias",
+                            "Contrasta métricas clave entre dos ejecuciones guardadas.",
+                        ):
+                            dataframe_block(comparison_df.reset_index())
 
-    st.divider()
+    divider()
     optim_tab, = st.tabs(["🧠 Optimización Avanzada"])
     with optim_tab:
-        st.subheader("🧠 Optimización Avanzada")
-        st.markdown(
-            "Consulta los resultados más recientes de la optimización automática y "
-            "analiza las métricas, curvas de equity y distribuciones de R-múltiplos."
+        section_header(
+            "🧠 Optimización Avanzada",
+            "Consulta los últimos resultados de optimización automática y sus métricas asociadas.",
+            level=2,
         )
 
         optimizer_path = Path("results/optimizer_results.csv")
@@ -1373,11 +1538,11 @@ elif tab == "📊 Analytics":
                     inplace=True,
                 )
 
-                st.write("### 🏆 Top 10 configuraciones optimizadas")
-                st.dataframe(
-                    optimizer_df.head(10).reset_index(drop=True),
-                    use_container_width=True,
-                )
+                with card(
+                    "🏆 Top 10 configuraciones optimizadas",
+                    "Listado de parámetros con mayor expectativa y control de drawdown.",
+                ):
+                    dataframe_block(optimizer_df.head(10).reset_index(drop=True))
 
                 if {"atr_mult_sl", "atr_mult_tp", "expectancy_R"}.issubset(
                     optimizer_df.columns
@@ -1391,9 +1556,22 @@ elif tab == "📊 Analytics":
                         color="max_drawdown",
                         size="profit_factor",
                         hover_data=["ema_fast", "ema_slow", "rsi_period"],
-                        title="Mapa 3D Expectancy vs ATR",
                     )
-                    st.plotly_chart(scatter_fig, use_container_width=True)
+                    scatter_fig.update_layout(
+                        template=template_name,
+                        scene=dict(
+                            xaxis_title="ATR SL",
+                            yaxis_title="ATR TP",
+                            zaxis_title="Expectancy (R)",
+                            bgcolor="rgba(0,0,0,0)",
+                        ),
+                        margin=dict(l=0, r=0, t=40, b=0),
+                    )
+                    chart_block(
+                        "🧠 Expectancy 3D",
+                        "Visualiza cómo cambia la expectativa según los multiplicadores de ATR.",
+                        scatter_fig,
+                    )
 
             if backtest_path.exists() and backtest_path.stat().st_size > 0:
                 try:
@@ -1402,8 +1580,11 @@ elif tab == "📊 Analytics":
                     st.error(f"No se pudo leer `best_backtest.csv`: {exc}")
                     metrics_df = pd.DataFrame()
                 if not metrics_df.empty:
-                    st.write("### 📊 Métricas del mejor backtest")
-                    st.dataframe(metrics_df.T.rename(columns={0: "Valor"}))
+                    with card(
+                        "📊 Métricas del mejor backtest",
+                        "Resumen cuantitativo del run con mayor rendimiento.",
+                    ):
+                        dataframe_block(metrics_df.T.rename(columns={0: "Valor"}))
 
             equity_df = None
             if equity_path.exists() and equity_path.stat().st_size > 0:
@@ -1423,9 +1604,18 @@ elif tab == "📊 Analytics":
                     equity_df,
                     x=equity_df.columns[0],
                     y="equity",
-                    title="Curva de equity (último run)",
                 )
-                st.plotly_chart(equity_fig, use_container_width=True)
+                equity_fig.update_layout(
+                    template=template_name,
+                    xaxis_title="Fecha",
+                    yaxis_title="Equity",
+                )
+                equity_fig.update_traces(line=dict(color=EQUITY_COLOR, width=3))
+                chart_block(
+                    "💹 Curva de Equity (último run)",
+                    "Historial acumulado del capital del run más reciente.",
+                    equity_fig,
+                )
 
             trades_df = None
             if trades_path.exists() and trades_path.stat().st_size > 0:
@@ -1450,18 +1640,31 @@ elif tab == "📊 Analytics":
                         trades_df,
                         x="r_multiple",
                         nbins=25,
-                        title="Distribución de R-múltiplos",
                     )
-                    st.plotly_chart(hist_fig, use_container_width=True)
+                    hist_fig.update_layout(
+                        template=template_name,
+                        xaxis_title="R-Múltiplo",
+                        yaxis_title="Frecuencia",
+                    )
+                    chart_block(
+                        "🔍 Distribución de R-Múltiplos",
+                        "Resultados de las operaciones del run optimizado más reciente.",
+                        hist_fig,
+                    )
 
 elif tab == "⚙️ Configuración":
-    st.title("⚙️ Configuración y ayuda")
-    st.write("### ⚙️ Configuración y ayuda")
-    st.write(
-        "Utiliza esta sección para gestionar archivos de configuración avanzados, documentar tus estrategias o añadir notas de operación."
+    section_header(
+        "⚙️ Configuración y ayuda",
+        "Recopila notas, ajusta tus archivos y mantén el flujo de trabajo ordenado.",
+        level=2,
     )
-    st.write(
-        "- Descarga datos desde la pestaña **Datos**.\n"
-        "- Ejecuta backtests visuales en la pestaña **Backtesting**.\n"
-        "- Personaliza tus `config.yaml` con los botones disponibles tras cada descarga."
-    )
+    with card(
+        "🧭 Guía rápida",
+        "Pasos recomendados para aprovechar todo el dashboard.",
+    ):
+        st.markdown(
+            "- Descarga datos desde la pestaña **Datos**.\n"
+            "- Ejecuta backtests visuales y optimizaciones en **Backtesting**.\n"
+            "- Analiza métricas avanzadas en **Analytics** y exporta reportes.\n"
+            "- Personaliza tus `config.yaml` con los botones disponibles tras cada descarga."
+        )
