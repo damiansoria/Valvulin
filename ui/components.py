@@ -47,7 +47,7 @@ def dataframe_block(df: pd.DataFrame, caption_text: str | None = None) -> None:
     styled_df = _style_dataframe(df)
     if caption_text:
         st.caption(caption_text)
-    st.dataframe(styled_df, use_container_width=True, hide_index=True)
+    st.dataframe(styled_df, width="stretch", hide_index=True)
 
 
 def _style_dataframe(df: pd.DataFrame) -> pd.io.formats.style.Styler:
