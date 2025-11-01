@@ -61,7 +61,7 @@ def _style_dataframe(df: pd.DataFrame) -> pd.io.formats.style.Styler:
         if col.lower().startswith("pnl") or "resultado" in col.lower()
     ]
 
-    def highlight_row(row: pd.Series) -> list[str]:
+    def highlight_row(row: pd.Series) -> pd.Series:
         if highlight_columns:
             reference_col = highlight_columns[0]
             value = row.get(reference_col)
@@ -82,10 +82,11 @@ def _style_dataframe(df: pd.DataFrame) -> pd.io.formats.style.Styler:
         css_class = (
             "valvulin-highlight-positive" if is_positive else "valvulin-highlight-negative"
         )
-        return [css_class for _ in row]
+        return pd.Series(css_class, index=row.index)
 
     try:
-        styler = styler.apply(highlight_row, axis=1)
+        class_matrix = df.apply(highlight_row, axis=1)
+        styler = styler.set_td_classes(class_matrix)
     except Exception:
         # As a fallback we do not apply row highlighting
         styler = styler
