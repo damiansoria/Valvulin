@@ -28,7 +28,8 @@ from analytics.plot_utils import (
     plot_r_multiple_distribution,
 )
 from valvulin.data.binance_public import BinancePublicDataFeed
-from modules.optimizer_advanced import PARAM_BOUNDS, run_optimizer
+from optimization import run_hybrid_optimization
+from optimization.bayesian_optimizer import BOUNDS as HYBRID_BOUNDS
 from modules.backtesting import run_backtest
 from utils.pdf_report import generate_pdf_report
 
@@ -378,22 +379,22 @@ elif tab == "🔁 Backtesting":
             st.session_state["backtest_tp_ratio"] = 2.0
 
     if optimizer_defaults:
-        ema_fast_key = "sma_fast_SMA Crossover"
-        if ema_fast_key not in st.session_state:
-            st.session_state[ema_fast_key] = int(
+        sma_fast_key = "sma_fast_SMA Crossover"
+        if sma_fast_key not in st.session_state:
+            st.session_state[sma_fast_key] = int(
                 np.clip(
-                    optimizer_defaults.get("ema_fast", 20),
-                    PARAM_BOUNDS["ema_fast"][0],
-                    PARAM_BOUNDS["ema_fast"][1],
+                    optimizer_defaults.get("sma_fast", 20),
+                    HYBRID_BOUNDS["sma_fast"][0],
+                    HYBRID_BOUNDS["sma_fast"][1],
                 )
             )
-        ema_slow_key = "sma_slow_SMA Crossover"
-        if ema_slow_key not in st.session_state:
-            st.session_state[ema_slow_key] = int(
+        sma_slow_key = "sma_slow_SMA Crossover"
+        if sma_slow_key not in st.session_state:
+            st.session_state[sma_slow_key] = int(
                 np.clip(
-                    optimizer_defaults.get("ema_slow", 50),
-                    PARAM_BOUNDS["ema_slow"][0],
-                    PARAM_BOUNDS["ema_slow"][1],
+                    optimizer_defaults.get("sma_slow", 80),
+                    HYBRID_BOUNDS["sma_slow"][0],
+                    HYBRID_BOUNDS["sma_slow"][1],
                 )
             )
         rsi_key = "rsi_period_RSI"
@@ -401,8 +402,8 @@ elif tab == "🔁 Backtesting":
             st.session_state[rsi_key] = int(
                 np.clip(
                     optimizer_defaults.get("rsi_period", 14),
-                    PARAM_BOUNDS["rsi_period"][0],
-                    PARAM_BOUNDS["rsi_period"][1],
+                    HYBRID_BOUNDS["rsi_period"][0],
+                    HYBRID_BOUNDS["rsi_period"][1],
                 )
             )
 
@@ -568,84 +569,227 @@ elif tab == "🔁 Backtesting":
                     "SMA Crossover y RSI."
                 )
             else:
-                st.info(
-                    "Ejecutando optimización avanzada... esto puede tardar unos minutos ⏳"
-                )
+
+                st.info("Iniciando optimización híbrida... esto puede tardar unos minutos ⏳")
                 try:
-                    best_payload, optimizer_df = run_optimizer(
+                    hybrid_result = run_hybrid_optimization(
                         data=df,
                         strategies=estrategias_seleccionadas,
                         capital_inicial=capital_inicial,
                         riesgo_por_trade=riesgo_por_trade,
                         logica=logica_combinacion,
                         symbol=symbol,
-                        mode="bayesiano",
-                        generations=20,
-                        random_state=42,
                     )
                 except Exception as exc:  # pragma: no cover - feedback para UI
-                    st.error(f"No se pudo completar la optimización: {exc}")
+                    st.error(f"No se pudo completar la optimización híbrida: {exc}")
                 else:
                     st.success("✅ Optimización completada")
 
-                    best_params = best_payload["best_params"]
-                    st.write("📈 Mejores parámetros encontrados:")
-                    st.dataframe(
-                        pd.DataFrame([best_params]),
-                        use_container_width=True,
+                    best_params = hybrid_result.best_params
+                    optimizer_df = hybrid_result.history.copy()
+                    if not optimizer_df.empty:
+                        optimizer_df = optimizer_df.rename(columns={"expectancy_r": "expectancy_R"})
+                        for column in [
+                            "sma_fast",
+                            "sma_slow",
+                            "rsi_period",
+                            "atr_mult_sl",
+                            "atr_mult_tp",
+                            "risk_per_trade",
+                            "expectancy_R",
+                            "profit_factor",
+                            "max_drawdown",
+                        ]:
+                            if column in optimizer_df.columns:
+                                optimizer_df[column] = pd.to_numeric(
+                                    optimizer_df[column], errors="coerce"
+                                )
+                    st.session_state["advanced_optimizer_best_params"] = {
+                        **best_params,
+                        "method": hybrid_result.method,
+                    }
+
+                    st.markdown("### 💡 Parámetros óptimos actuales (auto-seleccionados)")
+                    st.caption(
+                        "El motor híbrido combina optimización bayesiana y genética y selecciona automáticamente la variante con mejor expectancy y profit factor."
                     )
-                    st.session_state["advanced_optimizer_best_params"] = best_params
+                    best_display = pd.DataFrame([best_params])
+                    best_display.insert(0, "optimizer", hybrid_result.method)
+                    st.dataframe(best_display, use_container_width=True)
 
-                    st.info("Ejecutando backtest con los parámetros óptimos...")
-                    backtest_keys = [
-                        "data",
-                        "strategies",
-                        "params",
-                        "capital_inicial",
-                        "riesgo_por_trade",
-                        "sl_ratio",
-                        "tp_ratio",
-                        "logica",
-                        "symbol",
-                    ]
-                    backtest_kwargs = {key: best_payload[key] for key in backtest_keys}
-                    backtest_result = run_backtest(**backtest_kwargs)
-                    st.success("✅ Backtest completado")
+                    strategy_params = {
+                        "SMA Crossover": {
+                            "fast": int(best_params["sma_fast"]),
+                            "slow": int(best_params["sma_slow"]),
+                        },
+                        "RSI": {"period": int(best_params["rsi_period"])},
+                    }
+                    backtest_result = run_backtest(
+                        data=df,
+                        strategies=estrategias_seleccionadas,
+                        params=strategy_params,
+                        capital_inicial=capital_inicial,
+                        riesgo_por_trade=best_params["risk_per_trade"],
+                        sl_ratio=best_params["atr_mult_sl"],
+                        tp_ratio=best_params["atr_mult_tp"],
+                        logica=logica_combinacion,
+                        symbol=symbol,
+                    )
+                    st.success("✅ Backtest completado con parámetros óptimos")
 
-                    st.write("📊 Métricas del mejor backtest:")
-                    st.json(backtest_result["metrics"])
+                    st.markdown("### 📈 Backtesting Results")
+                    st.caption(
+                        "Visualiza el desempeño histórico de la estrategia con tus parámetros actuales o los optimizados automáticamente."
+                    )
+                    metrics_df = pd.DataFrame([backtest_result["metrics"]]).T.rename(columns={0: "Valor"})
+                    st.dataframe(metrics_df, use_container_width=True)
+
+                    equity_df = backtest_result["equity"].copy()
+                    trades_df = backtest_result["trades"].copy()
+
+                    st.markdown("### 🧠 Optimizations History")
+                    st.caption("Aquí puedes ver cómo el bot fue aprendiendo y adaptando sus parámetros al mercado.")
+                    if not optimizer_df.empty:
+                        history_df = optimizer_df.reset_index(drop=True)
+                        history_df["iteration"] = history_df.index + 1
+                        expectancy_fig = px.line(
+                            history_df,
+                            x="iteration",
+                            y="expectancy_R",
+                            color="method" if "method" in history_df.columns else None,
+                            title="Expectancy por iteración",
+                        )
+                        st.plotly_chart(expectancy_fig, use_container_width=True)
+                        if "max_drawdown" in history_df.columns and history_df["max_drawdown"].notna().any():
+                            drawdown_fig = px.line(
+                                history_df,
+                                x="iteration",
+                                y="max_drawdown",
+                                color="method" if "method" in history_df.columns else None,
+                                title="Drawdown por iteración",
+                            )
+                            st.plotly_chart(drawdown_fig, use_container_width=True)
+                        corr_cols = [
+                            "sma_fast",
+                            "sma_slow",
+                            "rsi_period",
+                            "atr_mult_sl",
+                            "atr_mult_tp",
+                            "risk_per_trade",
+                            "expectancy_R",
+                            "profit_factor",
+                        ]
+                        corr_df = history_df[corr_cols].dropna()
+                        if not corr_df.empty:
+                            st.markdown("### 🔥 Correlación entre parámetros y resultados")
+                            heatmap = px.imshow(
+                                corr_df.corr(),
+                                text_auto=".2f",
+                                color_continuous_scale="RdBu_r",
+                                title="Heatmap de correlación parámetros vs resultados",
+                            )
+                            st.plotly_chart(heatmap, use_container_width=True)
+                    else:
+                        st.info("Aún no hay historial suficiente para graficar las iteraciones de optimización.")
+
+                    st.markdown("### 📉 Equity Curve y Drawdown")
+                    st.caption(
+                        "Curva de patrimonio acumulado a lo largo del backtest. Muestra crecimiento y caídas temporales (drawdown)."
+                    )
+                    if not equity_df.empty:
+                        equity_index = equity_df.columns[0]
+                        equity_fig = px.line(equity_df, x=equity_index, y="equity", title="Curva de Equity")
+                        st.plotly_chart(equity_fig, use_container_width=True)
+                    raw_result = backtest_result.get("raw_result")
+                    if raw_result is not None and getattr(raw_result, "drawdown", None) is not None:
+                        drawdown_series = raw_result.drawdown * 100
+                        drawdown_df = drawdown_series.reset_index()
+                        drawdown_df.columns = ["timestamp", "drawdown_pct"]
+                        drawdown_area = px.area(
+                            drawdown_df,
+                            x="timestamp",
+                            y="drawdown_pct",
+                            title="Drawdown %",
+                        )
+                        st.plotly_chart(drawdown_area, use_container_width=True)
+
+                    if not trades_df.empty and "r_multiple" in trades_df.columns:
+                        st.markdown("### 🎯 Distribución de R-Múltiplos")
+                        st.caption("Indica cuántas operaciones alcanzaron distintos niveles de beneficio o pérdida.")
+                        trades_df = trades_df.copy()
+                        trades_df["trade_outcome"] = np.where(
+                            trades_df["r_multiple"] > 0, "Ganadora", "Perdedora"
+                        )
+                        distribution_fig = px.histogram(
+                            trades_df,
+                            x="r_multiple",
+                            nbins=25,
+                            color="trade_outcome",
+                            title="Distribución de R-Múltiplos",
+                        )
+                        st.plotly_chart(distribution_fig, use_container_width=True)
+
+                    if not optimizer_df.empty:
+                        st.markdown("### 🌐 3D Expectancy Map (ATR SL/TP vs RSI)")
+                        st.caption(
+                            "Mapa tridimensional que muestra cómo varía la rentabilidad esperada según los parámetros principales."
+                        )
+                        map_df = optimizer_df.dropna(subset=["atr_mult_sl", "atr_mult_tp", "expectancy_R"])
+                        if not map_df.empty:
+                            scatter_kwargs = {
+                                "x": "atr_mult_sl",
+                                "y": "atr_mult_tp",
+                                "z": "expectancy_R",
+                                "hover_data": [
+                                    col
+                                    for col in ["sma_fast", "sma_slow", "rsi_period", "method"]
+                                    if col in map_df.columns
+                                ],
+                                "title": "Mapa 3D de Expectancy",
+                            }
+                            if "profit_factor" in map_df.columns:
+                                scatter_kwargs["color"] = "profit_factor"
+                            if "risk_per_trade" in map_df.columns:
+                                scatter_kwargs["size"] = "risk_per_trade"
+                            map_fig = px.scatter_3d(map_df, **scatter_kwargs)
+                            st.plotly_chart(map_fig, use_container_width=True)
 
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                     run_dir = Path("results") / "runs" / timestamp
                     run_dir.mkdir(parents=True, exist_ok=True)
 
                     optimizer_path = Path("results/optimizer_results.csv")
-                    best_backtest_path = Path("results/best_backtest.csv")
                     optimizer_path.parent.mkdir(parents=True, exist_ok=True)
                     optimizer_df.to_csv(optimizer_path, index=False)
-                    pd.DataFrame([backtest_result["metrics"]]).to_csv(
-                        best_backtest_path, index=False
-                    )
+
+                    metrics_export = pd.DataFrame([backtest_result["metrics"]])
+                    metrics_export.to_csv(Path("results/best_backtest.csv"), index=False)
 
                     optimizer_df.to_csv(run_dir / "optimizer_results.csv", index=False)
-                    pd.DataFrame([backtest_result["metrics"]]).to_csv(
-                        run_dir / "best_backtest.csv", index=False
-                    )
+                    metrics_export.to_csv(run_dir / "best_backtest.csv", index=False)
 
+                    equity_df.to_csv(Path("results/equity_curve.csv"), index=False)
+                    trades_df.to_csv(Path("results/trades.csv"), index=False)
+                    equity_df.to_csv(run_dir / "equity_curve.csv", index=False)
+                    trades_df.to_csv(run_dir / "trades.csv", index=False)
+
+                    optimizer_summary = {
+                        "method": hybrid_result.method,
+                        "bayesian": hybrid_result.bayesian.metrics,
+                        "genetic": hybrid_result.genetic.metrics,
+                    }
                     config_payload = {
                         "optimizer": {
-                            "mode": "bayesiano",
-                            "generations": 20,
-                            "random_state": 42,
+                            "mode": "hibrido",
                             "strategies": list(estrategias_seleccionadas),
                             "best_params": best_params,
-                            "summary": best_payload["optimizer_summary"],
+                            "summary": optimizer_summary,
                         },
                         "backtest": {
                             "capital_inicial": capital_inicial,
-                            "riesgo_por_trade": riesgo_por_trade,
-                            "sl_ratio": backtest_kwargs["sl_ratio"],
-                            "tp_ratio": backtest_kwargs["tp_ratio"],
+                            "riesgo_por_trade": best_params["risk_per_trade"],
+                            "sl_ratio": best_params["atr_mult_sl"],
+                            "tp_ratio": best_params["atr_mult_tp"],
                             "logica": logica_combinacion,
                             "symbol": symbol,
                         },
@@ -655,128 +799,20 @@ elif tab == "🔁 Backtesting":
                         encoding="utf-8",
                     )
 
-                    equity_df = backtest_result["equity"].copy()
-                    trades_df = backtest_result["trades"].copy()
-                    equity_df.to_csv(Path("results/equity_curve.csv"), index=False)
-                    trades_df.to_csv(Path("results/trades.csv"), index=False)
-                    equity_df.to_csv(run_dir / "equity_curve.csv", index=False)
-                    trades_df.to_csv(run_dir / "trades.csv", index=False)
-
-                    equity_fig = px.line(
-                        equity_df,
-                        x=equity_df.columns[0],
-                        y="equity",
-                        title="Curva de equity",
-                    )
-                    st.plotly_chart(equity_fig, use_container_width=True)
-
-                    if "r_multiple" in trades_df.columns:
-                        hist_fig = px.histogram(
-                            trades_df,
-                            x="r_multiple",
-                            nbins=25,
-                            title="Distribución de R-múltiplos",
-                        )
-                        st.plotly_chart(hist_fig, use_container_width=True)
-
-                    sorted_optimizer = optimizer_df.copy()
-                    numeric_cols = [
-                        "ema_fast",
-                        "ema_slow",
-                        "rsi_period",
-                        "atr_mult_sl",
-                        "atr_mult_tp",
-                        "expectancy_R",
-                        "max_drawdown",
-                        "profit_factor",
-                        "rr_effective",
-                    ]
-                    for column in numeric_cols:
-                        if column in sorted_optimizer.columns:
-                            sorted_optimizer[column] = pd.to_numeric(
-                                sorted_optimizer[column], errors="coerce"
-                            )
-                    sorted_optimizer.dropna(
-                        subset=["expectancy_R", "max_drawdown"], inplace=True
-                    )
-                    sorted_optimizer.sort_values(
-                        by=["expectancy_R", "profit_factor", "max_drawdown"],
-                        ascending=[False, False, True],
-                        inplace=True,
-                    )
-                    top10_df = sorted_optimizer.head(10)
-                    st.write("🏆 Top 10 parámetros optimizados")
-                    st.dataframe(top10_df, use_container_width=True)
-
-                    optimizer_results_path = run_dir / "optimizer_results.csv"
-                    if optimizer_results_path.exists():
-                        plot_df = pd.read_csv(optimizer_results_path)
-                    else:
-                        plot_df = sorted_optimizer.copy()
-
-                    if not plot_df.empty and {
-                        "atr_mult_sl",
-                        "atr_mult_tp",
-                        "expectancy_R",
-                    }.issubset(plot_df.columns):
-                        for column in [
-                            "atr_mult_sl",
-                            "atr_mult_tp",
-                            "expectancy_R",
-                            "max_drawdown",
-                            "profit_factor",
-                        ]:
-                            plot_df[column] = pd.to_numeric(plot_df[column], errors="coerce")
-                        plot_df.dropna(
-                            subset=["atr_mult_sl", "atr_mult_tp", "expectancy_R"],
-                            inplace=True,
-                        )
-                        scatter3d = px.scatter_3d(
-                            plot_df,
-                            x="atr_mult_sl",
-                            y="atr_mult_tp",
-                            z="expectancy_R",
-                            color="max_drawdown",
-                            size="profit_factor",
-                            hover_data=["ema_fast", "ema_slow", "rsi_period"],
-                            title="Mapa 3D: Expectancy vs ATR Multipliers",
-                        )
-                        st.plotly_chart(scatter3d, use_container_width=True)
-
-                    plt_module = None
-                    try:
-                        import matplotlib.pyplot as plt  # type: ignore
-
-                        plt_module = plt
-                        plt.figure(figsize=(8, 4))
-                        plt.plot(equity_df.iloc[:, 0], equity_df["equity"], label="Equity")
-                        plt.xlabel("Tiempo")
-                        plt.ylabel("Equity")
-                        plt.title("Curva de Equity")
-                        plt.legend()
-                        plt.tight_layout()
-                        plt.savefig(run_dir / "equity_curve.png", dpi=150)
-                    except Exception:  # pragma: no cover - export opcional
-                        plt_module = None
-                    finally:
-                        if plt_module is not None:
-                            try:
-                                plt_module.close("all")
-                            except Exception:  # pragma: no cover - cleanup opcional
-                                pass
-
                     pdf_path = generate_pdf_report(best_params, backtest_result, optimizer_df, timestamp)
                     st.success("📄 Reporte PDF generado exitosamente")
 
                     st.session_state["auto_optimizer_run"] = {
                         "metrics": backtest_result["metrics"],
-                        "optimizer_results": sorted_optimizer.to_dict("records"),
+                        "optimizer_results": optimizer_df.to_dict("records"),
                         "equity": equity_df.to_dict("records"),
                         "trades": trades_df.to_dict("records"),
                         "run_dir": str(run_dir),
                         "timestamp": timestamp,
                         "pdf": pdf_path,
+                        "method": hybrid_result.method,
                     }
+
 
     stored = st.session_state.get("backtest_result")
     if stored:

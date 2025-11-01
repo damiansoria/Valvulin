@@ -7,6 +7,10 @@ from typing import Dict, List, Optional, Sequence
 import numpy as np
 import pandas as pd
 
+from core.atr_dynamic import calculate_levels, compute_atr, position_size
+from core.filters.trend_volatility_filter import allow_entry, build_context
+from database import models as db_models
+
 
 @dataclass
 class StrategyResult:
@@ -135,6 +139,28 @@ def calculate_metrics(trades_df: pd.DataFrame, equity_curve: pd.Series) -> Dict[
         if pnl_std > 0:
             sharpe_ratio = float((trades_df["pnl"].mean() / pnl_std) * np.sqrt(252))
 
+    cumulative_expectancy = float(r_values.sum()) if not r_values.empty else 0.0
+
+    monthly_expectancies: List[float] = []
+    monthly_profit_factors: List[float] = []
+    monthly_returns: Dict[str, float] = {}
+    if not trades_df.empty and "timestamp" in trades_df:
+        monthly = trades_df.copy()
+        monthly["timestamp"] = pd.to_datetime(monthly["timestamp"], errors="coerce")
+        monthly["month"] = monthly["timestamp"].dt.to_period("M")
+        for month, group in monthly.groupby("month"):
+            month_key = str(month)
+            r_group = group["r_multiple"].dropna()
+            if not r_group.empty:
+                monthly_expectancies.append(float(r_group.mean()))
+            gross_profit_m = group[group["pnl_usd"] > 0]["pnl_usd"].sum()
+            gross_loss_m = abs(group[group["pnl_usd"] < 0]["pnl_usd"].sum())
+            if gross_loss_m > 0:
+                monthly_profit_factors.append(float(gross_profit_m / gross_loss_m))
+            elif gross_profit_m > 0:
+                monthly_profit_factors.append(float("inf"))
+            monthly_returns[month_key] = float(group["pnl_usd"].sum())
+
     metrics = {
         "Total Trades": total_trades,
         "Winning Trades": int(len(wins)),
@@ -163,7 +189,38 @@ def calculate_metrics(trades_df: pd.DataFrame, equity_curve: pd.Series) -> Dict[
         and not trades_df["risk_usd"].empty
         else 0.0,
         "Sharpe Ratio": round(sharpe_ratio, 2),
+        "Expectancy R Cumulative": round(cumulative_expectancy, 3),
+        "Monthly Expectancy R (avg)": round(float(np.mean(monthly_expectancies)), 3)
+        if monthly_expectancies
+        else 0.0,
+        "Monthly Profit Factor (avg)": round(float(np.mean(monthly_profit_factors)), 3)
+        if monthly_profit_factors
+        else 0.0,
     }
+
+    metrics.setdefault("Rolling Sharpe 30d", 0.0)
+
+    if monthly_returns:
+        best_month = max(monthly_returns.items(), key=lambda item: item[1])
+        worst_month = min(monthly_returns.items(), key=lambda item: item[1])
+        metrics["Best Month"] = f"{best_month[0]} ({best_month[1]:.2f} USD)"
+        metrics["Worst Month"] = f"{worst_month[0]} ({worst_month[1]:.2f} USD)"
+    else:
+        metrics["Best Month"] = "-"
+        metrics["Worst Month"] = "-"
+
+    equity_returns = equity_curve.pct_change().dropna()
+    if not equity_returns.empty:
+        rolling_sharpe = equity_returns.rolling(window=30, min_periods=10).apply(
+            lambda window: (window.mean() / window.std()) * np.sqrt(252)
+            if window.std(ddof=0) > 0
+            else 0.0,
+            raw=False,
+        )
+        rolling_sharpe = rolling_sharpe.dropna()
+        if not rolling_sharpe.empty:
+            metrics["Rolling Sharpe 30d"] = round(float(rolling_sharpe.iloc[-1]), 3)
+
     return metrics
 
 
@@ -196,12 +253,18 @@ def run_backtest(
 
     df.sort_values(by="open_time", inplace=True, ignore_index=True)
 
+    if "high" not in df.columns:
+        df["high"] = df["close"]
+    if "low" not in df.columns:
+        df["low"] = df["close"]
+
     strategy_list = _normalize_strategies(strategies)
     if not strategy_list:
         raise ValueError("Debes seleccionar al menos una estrategia para el backtest.")
 
     params = params or {}
     signals_cols: List[str] = []
+    strategy_signal_map: Dict[str, str] = {}
 
     for idx, strategy in enumerate(strategy_list):
         if isinstance(params.get(strategy), dict):
@@ -212,6 +275,19 @@ def run_backtest(
         signal_col = f"signal_{idx}"
         df[signal_col] = _strategy_signal(df, strategy, strategy_params)
         signals_cols.append(signal_col)
+        strategy_signal_map[strategy] = signal_col
+
+    atr_period = 14
+    atr_series = compute_atr(df, period=atr_period)
+    atr_column = atr_series.name
+    df[atr_column] = atr_series
+
+    filter_context = build_context(
+        data=df,
+        atr_period=atr_period,
+        strategy_columns=strategy_signal_map,
+    )
+    use_full_atr = len(df) >= atr_period * 2
 
     combined = pd.DataFrame({col: df[col] for col in signals_cols})
     long_mask = combined.eq(1)
@@ -232,10 +308,9 @@ def run_backtest(
     symbol_value = symbol or ""
     trades: List[Dict[str, float | str | pd.Timestamp | None]] = []
 
-    riesgo_fraccion = float(riesgo_por_trade) / 100
     sl_ratio = float(sl_ratio) if sl_ratio > 0 else 1.0
     tp_ratio = float(tp_ratio) if tp_ratio > 0 else 2.0
-    base_fraction = 0.01
+    fallback_fraction = 0.01
 
     equity_values: List[float] = []
     equity_timestamps: List[pd.Timestamp] = []
@@ -271,20 +346,14 @@ def run_backtest(
     entry_stop_price: Optional[float] = None
     entry_take_price: Optional[float] = None
     entry_stop_distance: float = 0.0
+    entry_atr_value: float = 0.0
 
-    def _compute_levels(price: float, side: int) -> tuple[float, float, float]:
-        distance = price * base_fraction
-        stop_distance = distance * sl_ratio
-        take_distance = distance * tp_ratio
-        if side == 1:
-            stop_price = price - stop_distance
-            take_price = price + take_distance
-        else:
-            stop_price = price + stop_distance
-            take_price = price - take_distance
-        return stop_price, take_price, stop_distance
-
-    def _open_position(signal_value: int, price_value: float, timestamp_value: pd.Timestamp) -> None:
+    def _open_position(
+        signal_value: int,
+        price_value: float,
+        timestamp_value: pd.Timestamp,
+        atr_value: float,
+    ) -> None:
         nonlocal position
         nonlocal entry_price
         nonlocal entry_time
@@ -294,53 +363,71 @@ def run_backtest(
         nonlocal entry_stop_price
         nonlocal entry_take_price
         nonlocal entry_stop_distance
+        nonlocal entry_atr_value
 
         if signal_value == 0:
             return
         current_capital = max(capital, 0.0)
-        risk_amount = current_capital * riesgo_fraccion
-        if risk_amount <= 0 or price_value <= 0:
+        if current_capital <= 0 or price_value <= 0:
             return
-        stop_price_value, take_price_value, stop_distance = _compute_levels(
-            price_value, signal_value
+        atr_input = atr_value
+        if (not use_full_atr) or atr_value <= price_value * 0.001:
+            atr_input = price_value * fallback_fraction
+
+        levels = calculate_levels(
+            price=price_value,
+            atr_value=atr_input,
+            atr_mult_sl=sl_ratio,
+            atr_mult_tp=tp_ratio,
+            direction=signal_value,
         )
-        if stop_distance <= 0:
+        if levels.stop_distance <= 0:
             return
-        position_size_value = risk_amount / stop_distance
+        position_size_value = position_size(
+            capital=current_capital,
+            risk_percent=riesgo_por_trade,
+            atr_value=atr_input,
+            atr_mult_sl=sl_ratio,
+        )
         if position_size_value <= 0:
             return
         position = signal_value
         entry_price = price_value
         entry_time = timestamp_value
         entry_capital = capital
-        entry_risk_amount = risk_amount
+        entry_risk_amount = position_size_value * levels.stop_distance
         entry_position_size = position_size_value
-        entry_stop_price = stop_price_value
-        entry_take_price = take_price_value
-        entry_stop_distance = stop_distance
+        entry_stop_price = levels.stop_loss
+        entry_take_price = levels.take_profit
+        entry_stop_distance = levels.stop_distance
+        entry_atr_value = atr_input
 
-    for _, row in df.iterrows():
+    for idx, row in df.iterrows():
         signal = int(row.get("signal", 0))
         price = float(row.get("close", 0.0))
         timestamp = _normalise_timestamp(row.get("open_time"), equity_timestamps[-1])
+        atr_value = float(row.get(atr_column, 0.0))
 
         if position == 0:
-            _open_position(signal, price, timestamp)
+            if allow_entry(context=filter_context, index=idx, signal=signal, row=row):
+                _open_position(signal, price, timestamp, atr_value)
             continue
 
         if signal == position:
             continue
 
         direction = 1 if position == 1 else -1
-        position_size = entry_position_size
-        if position_size <= 0:
+        current_position_size = entry_position_size
+        if current_position_size <= 0:
             position = 0
             continue
 
         trade_return = (price - entry_price) / entry_price * direction
-        pnl_usd = direction * (price - entry_price) * position_size
+        pnl_usd = direction * (price - entry_price) * current_position_size
         stop_distance = entry_stop_distance if entry_stop_distance > 0 else abs(entry_price - (entry_stop_price or entry_price))
-        risk_amount = position_size * stop_distance if stop_distance > 0 else entry_risk_amount
+        risk_amount = (
+            current_position_size * stop_distance if stop_distance > 0 else entry_risk_amount
+        )
         r_multiple = (
             direction * (price - entry_price) / stop_distance
             if stop_distance > 0
@@ -362,7 +449,7 @@ def run_backtest(
                 "pnl_usd": pnl_usd,
                 "r_multiple": r_multiple,
                 "risk_usd": risk_amount,
-                "position_size": position_size,
+                "position_size": current_position_size,
                 "capital_inicial": entry_capital,
                 "capital_final": capital,
                 "stop_price": entry_stop_price,
@@ -371,6 +458,7 @@ def run_backtest(
                 "risk_pct": riesgo_por_trade,
                 "symbol": symbol_value,
                 "strategy": "+".join(strategy_list),
+                "atr_value": entry_atr_value,
             }
         )
         equity_values.append(capital)
@@ -385,6 +473,7 @@ def run_backtest(
             entry_stop_price = None
             entry_take_price = None
             entry_stop_distance = 0.0
+            entry_atr_value = 0.0
         else:
             position = 0
             entry_price = 0.0
@@ -394,18 +483,22 @@ def run_backtest(
             entry_stop_price = None
             entry_take_price = None
             entry_stop_distance = 0.0
-            _open_position(signal, price, timestamp)
+            entry_atr_value = 0.0
+            if allow_entry(context=filter_context, index=idx, signal=signal, row=row):
+                _open_position(signal, price, timestamp, atr_value)
 
     if position != 0 and entry_price > 0:
         last_row = df.iloc[-1]
         price = float(last_row.get("close", entry_price))
         timestamp = _normalise_timestamp(last_row.get("open_time"), equity_timestamps[-1])
         direction = 1 if position == 1 else -1
-        position_size = entry_position_size
+        current_position_size = entry_position_size
         trade_return = (price - entry_price) / entry_price * direction
-        pnl_usd = direction * (price - entry_price) * position_size
+        pnl_usd = direction * (price - entry_price) * current_position_size
         stop_distance = entry_stop_distance if entry_stop_distance > 0 else abs(entry_price - (entry_stop_price or entry_price))
-        risk_amount = position_size * stop_distance if stop_distance > 0 else entry_risk_amount
+        risk_amount = (
+            current_position_size * stop_distance if stop_distance > 0 else entry_risk_amount
+        )
         r_multiple = (
             direction * (price - entry_price) / stop_distance
             if stop_distance > 0
@@ -427,7 +520,7 @@ def run_backtest(
                 "pnl_usd": pnl_usd,
                 "r_multiple": r_multiple,
                 "risk_usd": risk_amount,
-                "position_size": position_size,
+                "position_size": current_position_size,
                 "capital_inicial": entry_capital,
                 "capital_final": capital,
                 "stop_price": entry_stop_price,
@@ -436,6 +529,7 @@ def run_backtest(
                 "risk_pct": riesgo_por_trade,
                 "symbol": symbol_value,
                 "strategy": "+".join(strategy_list),
+                "atr_value": entry_atr_value,
             }
         )
         equity_values.append(capital)
@@ -477,6 +571,16 @@ def run_backtest(
         else pd.DataFrame(columns=["pnl", "pnl_usd", "r_multiple", "risk_usd"]),
         equity_curve,
     )
+
+    try:
+        db_models.record_backtest_run(
+            symbol=symbol_value or symbol,
+            logica=logica,
+            capital=capital_inicial,
+            metrics=metrics,
+        )
+    except Exception:  # pragma: no cover - persistence errors should not break backtests
+        pass
 
     return StrategyResult(
         trades=trades_df,
